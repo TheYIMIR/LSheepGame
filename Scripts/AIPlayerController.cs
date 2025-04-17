@@ -2,7 +2,6 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using Mirror;
-using UnityEngine.UIElements;
 
 public class AIPlayerController : MonoBehaviour
 {
@@ -108,6 +107,9 @@ public class AIPlayerController : MonoBehaviour
     // Movement lock
     private bool movementLocked = true;
 
+    // Cache game manager reference
+    private GameManager gameManager;
+
     void Awake()
     {
         // Try to get network component if it exists
@@ -122,6 +124,7 @@ public class AIPlayerController : MonoBehaviour
     {
         rb = GetComponent<Rigidbody>();
         audioSource = GetComponent<AudioSource>();
+        gameManager = GameManager.Instance;
 
         if (audioSource == null)
         {
@@ -151,17 +154,23 @@ public class AIPlayerController : MonoBehaviour
         // Initialize behavior timer with random offset to desynchronize AI behavior
         behaviorTimer = Random.Range(0f, behaviorChangeInterval);
 
-        // Start with movement locked
+        // Start with movement locked - will be unlocked by the GameManager
         SetMovementLocked(true);
 
         // Check if game is already started (in case we join late)
         CheckGameStarted();
+
+        // Make sure we're in the active sheep list
+        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+        }
     }
 
     // Check if the game has already started when we join
     void CheckGameStarted()
     {
-        if (GameManager.Instance != null && GameManager.Instance.gameStarted)
+        if (gameManager != null && gameManager.gameStarted)
         {
             // Game already started, unlock movement
             SetMovementLocked(false);
@@ -178,7 +187,7 @@ public class AIPlayerController : MonoBehaviour
     {
         while (movementLocked)
         {
-            if (GameManager.Instance != null && GameManager.Instance.gameStarted)
+            if (gameManager != null && gameManager.gameStarted)
             {
                 SetMovementLocked(false);
                 yield break;
@@ -187,7 +196,7 @@ public class AIPlayerController : MonoBehaviour
         }
     }
 
-    // Method to lock/unlock movement
+    // Method to lock/unlock movement - called by GameManager or NetworkManager
     public void SetMovementLocked(bool locked)
     {
         movementLocked = locked;
@@ -207,9 +216,12 @@ public class AIPlayerController : MonoBehaviour
         if (isDead || movementLocked) return;
 
         // In network mode, only the server controls AI behavior
-        if (isNetworkMode && !NetworkServer.active)
+        if (isNetworkMode)
         {
-            return;
+            if (!NetworkServer.active)
+            {
+                return;
+            }
         }
 
         // Update behavior timer
@@ -535,6 +547,15 @@ public class AIPlayerController : MonoBehaviour
             if (!col.gameObject.activeSelf)
                 continue;
 
+            // Skip dead sheep
+            PlayerController playerController = col.GetComponent<PlayerController>();
+            if (playerController != null && playerController.enabled == false)
+                continue;
+
+            AIPlayerController aiController = col.GetComponent<AIPlayerController>();
+            if (aiController != null && aiController.enabled == false)
+                continue;
+
             float distance = Vector3.Distance(transform.position, col.transform.position);
             if (distance < closestDistance)
             {
@@ -681,8 +702,20 @@ public class AIPlayerController : MonoBehaviour
     void SetNewWanderTarget()
     {
         // Get a random point within arena bounds
-        Vector3 arenaSize = GameManager.Instance.GetArenaSize();
-        Vector3 arenaCenter = GameManager.Instance.GetArenaCenter();
+        Vector3 arenaSize = Vector3.zero;
+        Vector3 arenaCenter = Vector3.zero;
+
+        if (gameManager != null)
+        {
+            arenaSize = gameManager.GetArenaSize();
+            arenaCenter = gameManager.GetArenaCenter();
+        }
+        else
+        {
+            // Default arena size and center if gameManager not available
+            arenaSize = new Vector3(30, 0, 30);
+            arenaCenter = Vector3.zero;
+        }
 
         // Try to find a position that's not too close to other sheep
         Vector3 newTarget = Vector3.zero;
@@ -754,8 +787,10 @@ public class AIPlayerController : MonoBehaviour
 
     void KeepPositionInArena(ref Vector3 position)
     {
-        Vector3 arenaSize = GameManager.Instance.GetArenaSize();
-        Vector3 arenaCenter = GameManager.Instance.GetArenaCenter();
+        if (gameManager == null) return;
+
+        Vector3 arenaSize = gameManager.GetArenaSize();
+        Vector3 arenaCenter = gameManager.GetArenaCenter();
 
         position.x = Mathf.Clamp(position.x,
             arenaCenter.x - arenaSize.x / 2 + 1f,
@@ -963,7 +998,8 @@ public class AIPlayerController : MonoBehaviour
         }
 
         // Check if we hit another sheep with force
-        if (collision.gameObject.CompareTag("Sheep") && rb.velocity.magnitude > 3f)
+        if ((collision.gameObject.CompareTag("Sheep") || collision.gameObject.CompareTag("Player"))
+            && rb.velocity.magnitude > 3f)
         {
             HandleSheepCollision(collision);
         }
@@ -1014,7 +1050,7 @@ public class AIPlayerController : MonoBehaviour
             }
 
             // For network mode, sync the hit to other clients
-            if (isNetworkMode && NetworkServer.active)
+            if (isNetworkMode && NetworkServer.active && networkAI != null)
             {
                 // Find network components to sync the hit
                 NetworkSheepPlayer otherNetworkPlayer = collision.gameObject.GetComponent<NetworkSheepPlayer>();
@@ -1022,8 +1058,8 @@ public class AIPlayerController : MonoBehaviour
                 {
                     // Get direction and force
                     Vector3 direction = impactDirection.normalized;
-                    // Tell network component to sync the hit
-                    networkAI.SyncHitNetworkPlayer(otherNetworkPlayer.netId, direction, finalForce);
+                    // Use the generic sync hit entity method
+                    networkAI.SyncHitNetworkEntity(otherNetworkPlayer.netId, direction, finalForce);
                 }
 
                 NetworkAISheep otherNetworkAI = collision.gameObject.GetComponent<NetworkAISheep>();
@@ -1031,8 +1067,8 @@ public class AIPlayerController : MonoBehaviour
                 {
                     // Get direction and force
                     Vector3 direction = impactDirection.normalized;
-                    // Tell network component to sync the hit
-                    networkAI.SyncHitNetworkAI(otherNetworkAI.netId, direction, finalForce);
+                    // Use the generic sync hit entity method
+                    networkAI.SyncHitNetworkEntity(otherNetworkAI.netId, direction, finalForce);
                 }
             }
         }
@@ -1120,6 +1156,50 @@ public class AIPlayerController : MonoBehaviour
 
         isDead = true;
 
+        // Play death effects
+        PlayDeathEffects();
+
+        // For network mode, let server handle the death notification
+        if (isNetworkMode && networkAI != null)
+        {
+            if (NetworkServer.active)
+            {
+                // Server notifies all clients about the death
+                networkAI.SyncDeath();
+
+                // Notify game manager
+                if (gameManager != null)
+                {
+                    gameManager.SheepDied(gameObject);
+                }
+            }
+        }
+        else
+        {
+            // Regular offline notification
+            if (gameManager != null)
+            {
+                gameManager.SheepDied(gameObject);
+            }
+        }
+
+        // Disable mesh renderer but keep collider temporarily
+        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
+        foreach (MeshRenderer renderer in renderers)
+        {
+            renderer.enabled = false;
+        }
+
+        // Destroy the game object after a delay
+        if (!isNetworkMode || NetworkServer.active)
+        {
+            Destroy(gameObject, 2f);
+        }
+    }
+
+    // Play death effects without triggering network messages (can be called separately)
+    public void PlayDeathEffects()
+    {
         // Play explosion sound
         if (audioSource != null && explosionSound != null)
         {
@@ -1137,37 +1217,6 @@ public class AIPlayerController : MonoBehaviour
         if (explosionPrefab != null)
         {
             Instantiate(explosionPrefab, transform.position, Quaternion.identity);
-        }
-
-        // For network mode, let server handle the death notification
-        if (isNetworkMode && networkAI != null)
-        {
-            if (NetworkServer.active)
-            {
-                // Server notifies all clients about the death
-                networkAI.SyncDeath();
-
-                // Notify game manager
-                GameManager.Instance.SheepDied(gameObject);
-            }
-        }
-        else
-        {
-            // Regular offline notification
-            GameManager.Instance.SheepDied(gameObject);
-        }
-
-        // Disable mesh renderer but keep collider temporarily
-        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
-        foreach (MeshRenderer renderer in renderers)
-        {
-            renderer.enabled = false;
-        }
-
-        // Destroy the game object after a delay
-        if (!isNetworkMode || NetworkServer.active)
-        {
-            Destroy(gameObject, 2f);
         }
     }
 }

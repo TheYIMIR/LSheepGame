@@ -86,6 +86,9 @@ public class PlayerController : MonoBehaviour
     // Movement lock
     private bool movementLocked = true;
 
+    // Cache game manager reference
+    private GameManager gameManager;
+
     void Awake()
     {
         // Try to get network component if it exists
@@ -100,6 +103,7 @@ public class PlayerController : MonoBehaviour
     {
         rb = GetComponent<Rigidbody>();
         audioSource = GetComponent<AudioSource>();
+        gameManager = GameManager.Instance;
 
         if (audioSource == null)
         {
@@ -123,17 +127,23 @@ public class PlayerController : MonoBehaviour
         // Optimize physics settings for stability
         rb.maxAngularVelocity = 7;
 
-        // Start with movement locked
+        // Start with movement locked - will be unlocked by the GameManager
         SetMovementLocked(true);
 
         // Check if game is already started (in case we join late)
         CheckGameStarted();
+
+        // Make sure we're in the active sheep list
+        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+        }
     }
 
     // Check if the game has already started when we join
     void CheckGameStarted()
     {
-        if (GameManager.Instance != null && GameManager.Instance.gameStarted)
+        if (gameManager != null && gameManager.gameStarted)
         {
             // Game already started, unlock movement
             SetMovementLocked(false);
@@ -150,7 +160,7 @@ public class PlayerController : MonoBehaviour
     {
         while (movementLocked)
         {
-            if (GameManager.Instance != null && GameManager.Instance.gameStarted)
+            if (gameManager != null && gameManager.gameStarted)
             {
                 SetMovementLocked(false);
                 yield break;
@@ -159,7 +169,7 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    // Method to lock/unlock movement
+    // Method to lock/unlock movement - called by GameManager or NetworkManager
     public void SetMovementLocked(bool locked)
     {
         movementLocked = locked;
@@ -202,7 +212,7 @@ public class PlayerController : MonoBehaviour
         // In network mode, only process physics for local player or on server
         if (isNetworkMode && networkPlayer != null)
         {
-            if (!networkPlayer.isLocalPlayer && !networkPlayer.isServer)
+            if (!networkPlayer.isLocalPlayer && !NetworkServer.active)
             {
                 return;
             }
@@ -398,7 +408,8 @@ public class PlayerController : MonoBehaviour
         if (isDead || movementLocked) return;
 
         // Check if we hit another sheep with force
-        if (collision.gameObject.CompareTag("Sheep") && rb.velocity.magnitude > 3f)
+        if ((collision.gameObject.CompareTag("Sheep") || collision.gameObject.CompareTag("Player"))
+            && rb.velocity.magnitude > 3f)
         {
             HandleSheepCollision(collision);
         }
@@ -439,13 +450,21 @@ public class PlayerController : MonoBehaviour
             }
 
             // Handle network case
-            if (isNetworkMode)
+            if (isNetworkMode && networkPlayer != null && networkPlayer.isLocalPlayer)
             {
+                // Check if target is player or AI
                 NetworkSheepPlayer otherNetworkPlayer = collision.gameObject.GetComponent<NetworkSheepPlayer>();
-                if (otherNetworkPlayer != null && networkPlayer != null && networkPlayer.isLocalPlayer)
+                if (otherNetworkPlayer != null)
                 {
                     // Let the network component handle the hit notification
                     networkPlayer.HandleHitNetworkPlayer(otherNetworkPlayer.netId, finalForce);
+                }
+
+                NetworkAISheep otherNetworkAI = collision.gameObject.GetComponent<NetworkAISheep>();
+                if (otherNetworkAI != null)
+                {
+                    // Let the network component handle AI hit notification
+                    networkPlayer.HandleHitNetworkPlayer(otherNetworkAI.netId, finalForce);
                 }
             }
         }
@@ -525,12 +544,43 @@ public class PlayerController : MonoBehaviour
 
     public void Die()
     {
-        if (isDead) return;
+        if (isDead) return; // Prevent multiple deaths
 
         isDead = true;
 
+        // For network mode, let the network component handle death
+        if (isNetworkMode && networkPlayer != null && networkPlayer.isLocalPlayer)
+        {
+            networkPlayer.OnPlayerDeath();
+        }
+        else if (!isNetworkMode)
+        {
+            // Regular offline notification
+            if (gameManager != null)
+            {
+                gameManager.PlayerDied();
+            }
+
+            // Play death effects
+            PlayDeathEffects();
+        }
+
+        // Disable mesh renderer but keep collider to prevent further interactions
+        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
+        foreach (MeshRenderer renderer in renderers)
+        {
+            renderer.enabled = false;
+        }
+
+        // Optionally disable this script after a short delay
+        Invoke("DisableController", 1f);
+    }
+
+    // Play death effects without triggering network messages (can be called separately)
+    public void PlayDeathEffects()
+    {
         // Play explosion sound
-        if (explosionSound != null)
+        if (explosionSound != null && audioSource != null)
         {
             // Configure audio source for explosion sound
             audioSource.rolloffMode = AudioRolloffMode.Custom;
@@ -547,27 +597,6 @@ public class PlayerController : MonoBehaviour
         {
             Instantiate(explosionPrefab, transform.position, Quaternion.identity);
         }
-
-        // For network mode, let the network component handle death
-        if (isNetworkMode && networkPlayer != null && networkPlayer.isLocalPlayer)
-        {
-            networkPlayer.OnPlayerDeath();
-        }
-        else
-        {
-            // Regular offline notification
-            GameManager.Instance.PlayerDied();
-        }
-
-        // Disable mesh renderer but keep collider to prevent further interactions
-        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
-        foreach (MeshRenderer renderer in renderers)
-        {
-            renderer.enabled = false;
-        }
-
-        // Optionally disable this script after a short delay
-        Invoke("DisableController", 1f);
     }
 
     void DisableController()

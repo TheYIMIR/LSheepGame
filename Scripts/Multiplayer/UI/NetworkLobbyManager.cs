@@ -8,19 +8,22 @@ public class NetworkLobbyManager : NetworkBehaviour
     [SyncVar(hook = nameof(OnCountdownChanged))]
     public float currentCountdown = 60f;
 
-    [SyncVar]
+    [SyncVar(hook = nameof(OnCountdownActiveChanged))]
     public bool countdownActive = false;
 
     [SyncVar(hook = nameof(OnVotesChanged))]
     public int votesToStart = 0;
 
-    [SyncVar]
+    [SyncVar(hook = nameof(OnGameStartedChanged))]
     public bool gameStarted = false;
 
     [Header("UI References")]
     public Text countdownText;
     public Text votesText;
     public Text playersCountText;
+
+    // Reference to the LobbyUI for client-side updates
+    private LobbyUI lobbyUI;
 
     // Reference to the SheepNetworkManager
     private SheepNetworkManager networkManager;
@@ -43,6 +46,26 @@ public class NetworkLobbyManager : NetworkBehaviour
         UpdateServerInfo();
     }
 
+    public override void OnStartClient()
+    {
+        base.OnStartClient();
+
+        // Find the lobby UI
+        lobbyUI = FindObjectOfType<LobbyUI>();
+
+        // Find the network manager
+        if (networkManager == null)
+        {
+            networkManager = FindObjectOfType<SheepNetworkManager>();
+        }
+
+        if (lobbyUI != null)
+        {
+            // Update UI with current state
+            UpdateUIFromSyncVars();
+        }
+    }
+
     void Update()
     {
         if (isServer && countdownActive && !gameStarted)
@@ -61,6 +84,30 @@ public class NetworkLobbyManager : NetworkBehaviour
                 UpdateServerInfo();
             }
         }
+
+        // Update UI on client
+        if (!isServer && lobbyUI != null && countdownActive)
+        {
+            lobbyUI.UpdateCountdownUI(currentCountdown);
+        }
+    }
+
+    // Initialize UI from sync vars when client starts
+    void UpdateUIFromSyncVars()
+    {
+        if (lobbyUI != null)
+        {
+            // Update countdown
+            lobbyUI.UpdateCountdownUI(currentCountdown);
+
+            // Update votes if we have player counts
+            if (networkManager != null)
+            {
+                int playerCount = networkManager.CountConnectedPlayers();
+                lobbyUI.UpdateVotesUI(votesToStart, playerCount);
+                lobbyUI.UpdatePlayersUI(playerCount);
+            }
+        }
     }
 
     // Updates the server info for UI
@@ -73,7 +120,22 @@ public class NetworkLobbyManager : NetworkBehaviour
         // Use the improved counting method from network manager
         if (networkManager != null)
         {
-            playerCount = networkManager.CountTotalPlayers();
+            playerCount = networkManager.CountConnectedPlayers();
+            RpcUpdatePlayerCount(playerCount);
+
+            // Update votes UI
+            if (playerCount > 0)
+            {
+                RpcUpdateVoteCount(votesToStart, playerCount);
+            }
+        }
+    }
+
+    // Update player count info for all clients
+    public void UpdatePlayerCountUI(int playerCount)
+    {
+        if (isServer)
+        {
             RpcUpdatePlayerCount(playerCount);
         }
     }
@@ -95,7 +157,7 @@ public class NetworkLobbyManager : NetworkBehaviour
         if (!isServer) return;
 
         countdownActive = true;
-        currentCountdown = 60f; // Initial countdown of 60 seconds
+        currentCountdown = NetworkGameConfig.LOBBY_COUNTDOWN_SECONDS;
     }
 
     // Start the game
@@ -114,7 +176,7 @@ public class NetworkLobbyManager : NetworkBehaviour
             networkManager.FillWithBots();
 
             // Change to the game scene
-            networkManager.ServerChangeScene("SheepBattleground");
+            networkManager.ServerChangeScene(NetworkGameConfig.GAME_SCENE_NAME);
         }
     }
 
@@ -126,6 +188,7 @@ public class NetworkLobbyManager : NetworkBehaviour
         gameStarted = false;
         votesToStart = 0;
         countdownActive = false;
+        currentCountdown = NetworkGameConfig.LOBBY_COUNTDOWN_SECONDS;
     }
 
     // Check if enough votes to skip countdown
@@ -138,16 +201,14 @@ public class NetworkLobbyManager : NetworkBehaviour
         // Use the improved counting method from network manager
         if (networkManager != null)
         {
-            playerCount = networkManager.CountTotalPlayers();
+            playerCount = networkManager.CountConnectedPlayers();
+
+            // Debug log the votes
+            Debug.Log($"Votes: {votesToStart}/{playerCount}");
         }
         else
         {
             playerCount = NetworkServer.connections.Count;
-            // Add host if in host mode
-            if (NetworkServer.active && NetworkClient.active)
-            {
-                playerCount++; // Count the host
-            }
         }
 
         if (playerCount < 1) return;
@@ -155,10 +216,10 @@ public class NetworkLobbyManager : NetworkBehaviour
         float votePercentage = (float)votesToStart / playerCount;
 
         // If at least 50% voted to start
-        if (votePercentage >= 0.5f)
+        if (votePercentage >= NetworkGameConfig.VOTE_SKIP_PERCENTAGE)
         {
             // Set countdown to 3 seconds
-            currentCountdown = 3f;
+            currentCountdown = NetworkGameConfig.VOTE_SKIP_COUNTDOWN_SECONDS;
 
             // Notify clients
             RpcVoteThresholdReached();
@@ -171,21 +232,49 @@ public class NetworkLobbyManager : NetworkBehaviour
     // Called when countdown changes
     void OnCountdownChanged(float oldValue, float newValue)
     {
-        UpdateCountdownUI();
+        // Update UI on clients
+        if (!isServer && lobbyUI != null)
+        {
+            lobbyUI.UpdateCountdownUI(newValue);
+        }
+    }
+
+    // Called when countdown active state changes
+    void OnCountdownActiveChanged(bool oldValue, bool newValue)
+    {
+        // Enable/disable UI elements based on countdown state
+        if (!isServer && lobbyUI != null)
+        {
+            // Could enable/disable countdown text here
+            if (newValue)
+            {
+                lobbyUI.countdownText.gameObject.SetActive(true);
+            }
+        }
     }
 
     // Called when vote count changes
     void OnVotesChanged(int oldValue, int newValue)
     {
         // Update is handled through CheckVoteThreshold and RpcUpdateVoteCount
+        Debug.Log($"Votes changed from {oldValue} to {newValue}");
+
+        // Update all clients with new vote count
+        if (isServer && networkManager != null)
+        {
+            int playerCount = networkManager.CountConnectedPlayers();
+            RpcUpdateVoteCount(newValue, playerCount);
+        }
     }
 
-    // Update the countdown UI
-    void UpdateCountdownUI()
+    // Called when game started changes
+    void OnGameStartedChanged(bool oldValue, bool newValue)
     {
-        if (countdownText != null)
+        // React to game started state change (could show "Game Starting..." text)
+        if (newValue && !oldValue && !isServer && lobbyUI != null)
         {
-            countdownText.text = $"Game starts in: {Mathf.CeilToInt(currentCountdown)}";
+            // Show game starting message
+            lobbyUI.countdownText.text = "Game Starting...";
         }
     }
 
@@ -193,7 +282,13 @@ public class NetworkLobbyManager : NetworkBehaviour
     [ClientRpc]
     void RpcUpdateVoteCount(int votes, int playerCount)
     {
-        if (votesText != null && playerCount > 0)
+        if (playerCount <= 0) return;
+
+        if (lobbyUI != null)
+        {
+            lobbyUI.UpdateVotesUI(votes, playerCount);
+        }
+        else if (votesText != null)
         {
             float percentage = (float)votes / playerCount * 100f;
             votesText.text = $"Votes: {votes}/{playerCount} ({Mathf.FloorToInt(percentage)}%)";
@@ -204,15 +299,23 @@ public class NetworkLobbyManager : NetworkBehaviour
     [ClientRpc]
     void RpcUpdatePlayerCount(int playerCount)
     {
-        if (playersCountText != null)
+        if (lobbyUI != null)
         {
-            int maxPlayers = 100;
-            if (networkManager != null)
-            {
-                maxPlayers = networkManager.maxPlayersPerLobby;
-            }
+            lobbyUI.UpdatePlayersUI(playerCount);
+        }
+        else if (playersCountText != null)
+        {
+            int maxPlayers = NetworkGameConfig.MAX_PLAYERS_PER_LOBBY;
             playersCountText.text = $"Players: {playerCount}/{maxPlayers}";
         }
+
+        // Also update votes display with new player count
+        if (isServer)
+        {
+            RpcUpdateVoteCount(votesToStart, playerCount);
+        }
+
+        Debug.Log($"Updated player count to: {playerCount}");
     }
 
     // Notify clients that vote threshold was reached
@@ -220,5 +323,11 @@ public class NetworkLobbyManager : NetworkBehaviour
     void RpcVoteThresholdReached()
     {
         Debug.Log("Vote threshold reached! Game starting soon...");
+
+        // Update UI with skipped countdown
+        if (lobbyUI != null)
+        {
+            lobbyUI.countdownText.text = "Starting Soon!";
+        }
     }
 }

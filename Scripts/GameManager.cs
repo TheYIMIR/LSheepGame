@@ -53,6 +53,12 @@ public class GameManager : MonoBehaviour
     private AudioSource audioSource;
     private string playerName = "Player";
 
+    // Track if we need to update the sheep count
+    private bool sheepCountDirty = false;
+
+    // Debug visualization for arena boundaries
+    public bool debugVisualizeArena = true;
+
     void Awake()
     {
         // Singleton setup
@@ -174,6 +180,9 @@ public class GameManager : MonoBehaviour
 
         gameStarted = true;
 
+        // Trigger game started event
+        GameEvents.TriggerGameStarted();
+
         // Enable all sheep movement
         EnableAllSheep();
     }
@@ -228,6 +237,7 @@ public class GameManager : MonoBehaviour
             if (netPlayer.isLocalPlayer)
             {
                 playerSheep = player;
+                Debug.Log("Set local player reference: " + player.name);
             }
         }
 
@@ -347,8 +357,38 @@ public class GameManager : MonoBehaviour
         {
             if (sheep == null) continue;
 
+            // Call separate method to apply boundaries
             EnforceArenaBoundaries(sheep);
         }
+
+        // Update sheep count if changed
+        if (sheepCountDirty)
+        {
+            UpdateSheepCountUI();
+            sheepCountDirty = false;
+        }
+    }
+
+    void OnDrawGizmos()
+    {
+        if (debugVisualizeArena)
+        {
+            // Draw arena boundaries for debugging
+            Vector3 center = GetArenaCenter();
+            Vector3 size = GetArenaSize();
+
+            // Set color
+            Gizmos.color = Color.red;
+
+            // Draw wireframe cube for arena boundaries
+            Gizmos.DrawWireCube(center, size);
+        }
+    }
+
+    void LateUpdate()
+    {
+        // Clean up any null references in the activeSheep list
+        activeSheep.RemoveAll(sheep => sheep == null);
     }
 
     void CheckGameEndConditions()
@@ -361,7 +401,7 @@ public class GameManager : MonoBehaviour
         if (currentCount != remainingSheepCount)
         {
             remainingSheepCount = currentCount;
-            UpdateSheepCountUI();
+            sheepCountDirty = true;
         }
 
         // Check if player is still alive
@@ -374,9 +414,10 @@ public class GameManager : MonoBehaviour
         // Game end conditions - handle differently for network games
         if (isNetworkGame)
         {
-            if (!playerAlive)
+            // For network games, the NetworkGameManager handles win/loss conditions
+            if (!playerAlive && !gameOver)
             {
-                // Player died, but continue the match for others
+                // Player died, show defeat panel for this player only
                 playerSheep = null;
 
                 // Show defeat panel for this player
@@ -393,14 +434,6 @@ public class GameManager : MonoBehaviour
 
                 // Play random defeat sound
                 PlayRandomSound(defeatSounds);
-            }
-            else if (activeSheep.Count == 1 && playerAlive)
-            {
-                // This player is the only one left - they win!
-                EndGame(true);
-
-                // In network game, this should be synchronized across clients
-                // by the NetworkGameManager
             }
         }
         else
@@ -466,6 +499,9 @@ public class GameManager : MonoBehaviour
         {
             mainMenuButton.gameObject.SetActive(true);
         }
+
+        // Trigger game over event
+        GameEvents.TriggerGameOver(playerWon);
     }
 
     public void UpdateSheepCountUI()
@@ -478,29 +514,89 @@ public class GameManager : MonoBehaviour
 
     void EnforceArenaBoundaries(GameObject sheep)
     {
+        // Skip if sheep is null
+        if (sheep == null) return;
+
+        // Get the rigidbody
         Rigidbody rb = sheep.GetComponent<Rigidbody>();
         if (rb == null) return;
 
+        // In network mode, check if this is a host player with authority
+        bool isHostWithAuthority = false;
+        NetworkSheepPlayer netPlayer = sheep.GetComponent<NetworkSheepPlayer>();
+        if (isNetworkGame && netPlayer != null && netPlayer.isLocalPlayer && NetworkServer.active)
+        {
+            isHostWithAuthority = true;
+            // Debug.Log("Applying boundaries to host player");
+        }
+
+        // Get arena center and boundaries
         Vector3 centerPos = GetArenaCenter();
         Vector3 sheepToCenter = centerPos - sheep.transform.position;
         sheepToCenter.y = 0; // Keep it on horizontal plane
 
-        // Check if beyond bounds
+        // Get arena dimensions
         float halfWidth = arenaSize.x / 2;
         float halfLength = arenaSize.z / 2;
 
-        if (Mathf.Abs(sheep.transform.position.x - centerPos.x) > halfWidth ||
-            Mathf.Abs(sheep.transform.position.z - centerPos.z) > halfLength)
+        // Check if beyond boundary on X axis
+        bool outsideX = Mathf.Abs(sheep.transform.position.x - centerPos.x) > halfWidth;
+        // Check if beyond boundary on Z axis
+        bool outsideZ = Mathf.Abs(sheep.transform.position.z - centerPos.z) > halfLength;
+
+        // If either axis is outside the boundary
+        if (outsideX || outsideZ)
         {
-            // Apply force back towards center
-            rb.AddForce(sheepToCenter.normalized * boundaryForce, ForceMode.Force);
+            // Calculate force direction towards center
+            Vector3 forceDirection = Vector3.zero;
+
+            // For X axis
+            if (outsideX)
+            {
+                float distanceX = Mathf.Abs(sheep.transform.position.x - centerPos.x) - halfWidth;
+                float signX = Mathf.Sign(centerPos.x - sheep.transform.position.x);
+                forceDirection.x = signX * distanceX;
+            }
+
+            // For Z axis
+            if (outsideZ)
+            {
+                float distanceZ = Mathf.Abs(sheep.transform.position.z - centerPos.z) - halfLength;
+                float signZ = Mathf.Sign(centerPos.z - sheep.transform.position.z);
+                forceDirection.z = signZ * distanceZ;
+            }
+
+            // Normalize and apply force - use stronger force for host player
+            float forceMagnitude = boundaryForce;
+            if (isHostWithAuthority)
+            {
+                forceMagnitude *= 2.0f; // Apply stronger force to host player
+            }
+
+            // Apply force towards center
+            rb.AddForce(forceDirection.normalized * forceMagnitude, ForceMode.Force);
+
+            // Debug visualize
+            Debug.DrawLine(sheep.transform.position,
+                          sheep.transform.position + forceDirection.normalized * 3f,
+                          Color.red, 0.1f);
         }
     }
 
     public void SheepDied(GameObject sheep)
     {
+        // Log for debugging
+        Debug.Log($"Sheep died: {sheep.name}");
+
         // Remove from active list
-        activeSheep.Remove(sheep);
+        if (activeSheep.Contains(sheep))
+        {
+            activeSheep.Remove(sheep);
+            sheepCountDirty = true;
+
+            // Trigger the sheep death event
+            GameEvents.TriggerSheepDeath(sheep);
+        }
 
         // If it was the player who died
         if (sheep == playerSheep)
@@ -515,6 +611,7 @@ public class GameManager : MonoBehaviour
         // Check if playerSheep is null, if not, set it
         if (playerSheep != null)
         {
+            Debug.Log("Player died!");
             SheepDied(playerSheep);
         }
     }

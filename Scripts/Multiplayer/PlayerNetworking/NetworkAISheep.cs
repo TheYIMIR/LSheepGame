@@ -11,6 +11,10 @@ public class NetworkAISheep : NetworkBehaviour
     private AIPlayerController aiController;
     private Rigidbody rb;
 
+    // Flag to identify network-spawned bots
+    [SyncVar]
+    public bool isNetworkBot = false;
+
     // Synced state for AI
     [SyncVar(hook = nameof(OnStateChanged))]
     private int currentStateInt = 0;
@@ -26,6 +30,9 @@ public class NetworkAISheep : NetworkBehaviour
     [SyncVar(hook = nameof(OnDeathStatusChanged))]
     private bool isDead = false;
 
+    // Cache reference to game manager
+    private GameManager gameManager;
+
     void Awake()
     {
         aiController = GetComponent<AIPlayerController>();
@@ -35,6 +42,37 @@ public class NetworkAISheep : NetworkBehaviour
         gameObject.tag = "Sheep";
     }
 
+    void Start()
+    {
+        // Make sure AIPlayerController knows we're in network mode
+        if (aiController != null)
+        {
+            aiController.isNetworkMode = true;
+        }
+
+        // Cache reference to game manager
+        gameManager = GameManager.Instance;
+
+        // Make sure we're added to active sheep list on server
+        if (isServer && gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+            Debug.Log($"Added AI sheep to active list: {gameObject.name}");
+        }
+
+        // Initially lock AI movement until game starts
+        if (aiController != null)
+        {
+            aiController.SetMovementLocked(true);
+
+            // Unlock if game already started
+            if (gameManager != null && gameManager.gameStarted)
+            {
+                aiController.SetMovementLocked(false);
+            }
+        }
+    }
+
     public override void OnStartServer()
     {
         base.OnStartServer();
@@ -42,14 +80,24 @@ public class NetworkAISheep : NetworkBehaviour
         // Initialize AI state for server
         currentStateInt = (int)AIPlayerController.AIState.Wander;
         stateTimer = 0;
+
+        // We need to add ourselves to the GameManager's active sheep list
+        StartCoroutine(DelayedAddToActiveSheep());
     }
 
-    void Start()
+    private IEnumerator DelayedAddToActiveSheep()
     {
-        // Make sure AIPlayerController knows we're in network mode
-        if (aiController != null)
+        yield return new WaitForSeconds(0.2f);
+
+        if (gameManager == null)
         {
-            aiController.isNetworkMode = true;
+            gameManager = GameManager.Instance;
+        }
+
+        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+            Debug.Log($"Added AI sheep to active list (delayed): {gameObject.name}");
         }
     }
 
@@ -117,22 +165,23 @@ public class NetworkAISheep : NetworkBehaviour
         }
     }
 
-    // Sync hit to network player
-    public void SyncHitNetworkPlayer(uint targetNetId, Vector3 direction, float force)
+    // Sync hit to network player or AI
+    public void SyncHitNetworkEntity(uint targetNetId, Vector3 direction, float force)
     {
         if (!isServer) return;
 
-        // Pass to all clients
-        RpcHitPlayer(targetNetId, direction, force);
-    }
-
-    // Sync hit to network AI
-    public void SyncHitNetworkAI(uint targetNetId, Vector3 direction, float force)
-    {
-        if (!isServer) return;
-
-        // Pass to all clients
-        RpcHitAI(targetNetId, direction, force);
+        // Determine if target is player or AI and call appropriate method
+        if (NetworkServer.spawned.TryGetValue(targetNetId, out NetworkIdentity targetIdentity))
+        {
+            if (targetIdentity.GetComponent<NetworkSheepPlayer>() != null)
+            {
+                RpcHitPlayer(targetNetId, direction, force);
+            }
+            else if (targetIdentity.GetComponent<NetworkAISheep>() != null)
+            {
+                RpcHitAI(targetNetId, direction, force);
+            }
+        }
     }
 
     // RPC to apply hit effects to player
@@ -179,16 +228,35 @@ public class NetworkAISheep : NetworkBehaviour
         }
     }
 
+    // Method for clients to apply network hit force
+    [ClientRpc]
+    public void RpcApplyHitForce(Vector3 direction, float force)
+    {
+        if (aiController != null)
+        {
+            aiController.ApplyNetworkHitForce(direction, force);
+        }
+    }
+
     // Sync death across network
     public void SyncDeath()
     {
         if (!isServer) return;
+
+        // Log the death
+        Debug.Log($"AI sheep death synced: {gameObject.name}");
 
         // Set the death status
         isDead = true;
 
         // Notify all clients
         RpcOnDeath();
+
+        // Notify game manager
+        if (gameManager != null)
+        {
+            gameManager.SheepDied(gameObject);
+        }
     }
 
     // Called when death status changes (on clients)
@@ -197,6 +265,7 @@ public class NetworkAISheep : NetworkBehaviour
         if (newValue && !oldValue)
         {
             // If we went from alive to dead
+            Debug.Log($"AI sheep death status changed to dead: {gameObject.name}");
             HandleDeath();
         }
     }
@@ -207,18 +276,64 @@ public class NetworkAISheep : NetworkBehaviour
     {
         if (isServer) return; // Server already handled death
 
+        Debug.Log($"RPC received for AI sheep death: {gameObject.name}");
         HandleDeath();
     }
 
     // Handles death effects on all clients
     void HandleDeath()
     {
+        if (isDead) return; // Prevent multiple death processes
+
+        Debug.Log($"Handling AI sheep death: {gameObject.name}");
+
         if (aiController != null)
         {
             // Call Die() on the controller, but don't let it destroy the object (server will do that)
             aiController.Die();
         }
 
-        // Additional visual effects could be added here
+        // Disable mesh renderer
+        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
+        foreach (MeshRenderer renderer in renderers)
+        {
+            renderer.enabled = false;
+        }
+
+        // Disable physics interactions
+        if (rb != null)
+        {
+            rb.isKinematic = true;
+        }
+
+        // If not server, notify game manager directly on client
+        if (!isServer && gameManager != null && gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.SheepDied(gameObject);
+        }
+    }
+
+    // This method can be called to ensure server authority over AI sheep
+    [Server]
+    public void ServerSetLocked(bool locked)
+    {
+        if (aiController != null)
+        {
+            aiController.SetMovementLocked(locked);
+        }
+
+        // Sync to clients
+        RpcSetLocked(locked);
+    }
+
+    [ClientRpc]
+    void RpcSetLocked(bool locked)
+    {
+        if (isServer) return; // Server already set this
+
+        if (aiController != null)
+        {
+            aiController.SetMovementLocked(locked);
+        }
     }
 }

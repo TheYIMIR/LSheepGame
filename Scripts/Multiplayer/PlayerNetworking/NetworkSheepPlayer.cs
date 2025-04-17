@@ -11,13 +11,15 @@ public class NetworkSheepPlayer : NetworkBehaviour
     [SyncVar]
     public bool hasVoted = false;
 
+    [SyncVar(hook = nameof(OnDeadStatusChanged))]
+    public bool isDead = false;
+
     // Reference to the base player controller
     private PlayerController playerController;
     private Rigidbody rb;
 
-    // Keep track of death state to avoid multiple death notifications
-    [SyncVar]
-    private bool isDead = false;
+    // Cache game manager reference
+    private GameManager gameManager;
 
     void Awake()
     {
@@ -28,6 +30,19 @@ public class NetworkSheepPlayer : NetworkBehaviour
         gameObject.tag = "Sheep";
     }
 
+    void Start()
+    {
+        // Cache game manager reference
+        gameManager = GameManager.Instance;
+
+        // Make sure we're added to active sheep list
+        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+            Debug.Log($"Added player to active list: {gameObject.name}");
+        }
+    }
+
     public override void OnStartServer()
     {
         base.OnStartServer();
@@ -36,6 +51,25 @@ public class NetworkSheepPlayer : NetworkBehaviour
         if (string.IsNullOrEmpty(playerName))
         {
             playerName = $"Sheep_{Random.Range(100, 999)}";
+        }
+
+        // We need to add ourselves to the GameManager's active sheep list
+        StartCoroutine(DelayedAddToActiveSheep());
+    }
+
+    private System.Collections.IEnumerator DelayedAddToActiveSheep()
+    {
+        yield return new WaitForSeconds(0.2f);
+
+        if (gameManager == null)
+        {
+            gameManager = GameManager.Instance;
+        }
+
+        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.activeSheep.Add(gameObject);
+            Debug.Log($"Added player to active list (delayed): {gameObject.name}");
         }
     }
 
@@ -54,6 +88,12 @@ public class NetworkSheepPlayer : NetworkBehaviour
         {
             playerController.enabled = false;
         }
+
+        // Set player movement to locked initially (will be unlocked when game starts)
+        if (playerController != null)
+        {
+            playerController.SetMovementLocked(true);
+        }
     }
 
     public override void OnStartLocalPlayer()
@@ -68,6 +108,23 @@ public class NetworkSheepPlayer : NetworkBehaviour
         else
         {
             CmdSetPlayerName($"Player_{Random.Range(100, 999)}");
+        }
+
+        // Set the tag for local player
+        gameObject.tag = "Player";
+
+        // Tell the camera to follow this player
+        FindAndSetupCamera();
+    }
+
+    // Find camera and set it to follow this player
+    void FindAndSetupCamera()
+    {
+        SmoothCameraFollow cameraFollow = FindObjectOfType<SmoothCameraFollow>();
+        if (cameraFollow != null)
+        {
+            cameraFollow.target = transform;
+            Debug.Log("Camera now following local player");
         }
     }
 
@@ -138,6 +195,17 @@ public class NetworkSheepPlayer : NetworkBehaviour
         Debug.Log($"Player name changed from {oldName} to {newName}");
     }
 
+    // Called when death status changes
+    void OnDeadStatusChanged(bool oldValue, bool newValue)
+    {
+        if (newValue && !oldValue)
+        {
+            // Process death on all clients
+            Debug.Log($"Player death status changed to dead: {gameObject.name}");
+            ProcessDeath();
+        }
+    }
+
     // Handle collisions between network players
     public void HandleHitNetworkPlayer(uint targetNetId, float impactForce)
     {
@@ -166,16 +234,24 @@ public class NetworkSheepPlayer : NetworkBehaviour
         Vector3 hitDirection = (targetPos - hitPosition).normalized;
         hitDirection.y = 0; // Keep on horizontal plane
 
-        // Apply effect on the target
+        // Check if target is an AI or player
         NetworkSheepPlayer targetPlayer = targetObj.GetComponent<NetworkSheepPlayer>();
         if (targetPlayer != null)
         {
             targetPlayer.RpcApplyHitForce(hitDirection, impactForce);
         }
+        else
+        {
+            NetworkAISheep targetAI = targetObj.GetComponent<NetworkAISheep>();
+            if (targetAI != null)
+            {
+                targetAI.RpcApplyHitForce(hitDirection, impactForce);
+            }
+        }
     }
 
     [ClientRpc]
-    void RpcApplyHitForce(Vector3 direction, float force)
+    public void RpcApplyHitForce(Vector3 direction, float force)
     {
         if (playerController != null)
         {
@@ -188,6 +264,7 @@ public class NetworkSheepPlayer : NetworkBehaviour
     {
         if (isLocalPlayer && !isDead)
         {
+            Debug.Log($"Local player died: {gameObject.name}");
             CmdPlayerDied();
         }
     }
@@ -197,21 +274,27 @@ public class NetworkSheepPlayer : NetworkBehaviour
     {
         // Avoid duplicate deaths
         if (isDead) return;
+
+        Debug.Log($"Player death command received on server: {gameObject.name}");
         isDead = true;
 
         // Notify game manager on server
-        if (GameManager.Instance != null)
+        if (gameManager != null)
         {
-            GameManager.Instance.SheepDied(gameObject);
+            Debug.Log($"Notifying game manager of player death: {gameObject.name}");
+            gameManager.SheepDied(gameObject);
         }
-
-        // Notify all clients that this player died
-        RpcOnPlayerDied();
+        else
+        {
+            Debug.LogError("Game manager is null when trying to notify of player death");
+        }
     }
 
-    [ClientRpc]
-    void RpcOnPlayerDied()
+    // Process death effects (called on all clients)
+    void ProcessDeath()
     {
+        Debug.Log($"Processing player death: {gameObject.name}");
+
         // Update local UI to show this player is dead
         MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
         foreach (MeshRenderer renderer in renderers)
@@ -225,7 +308,29 @@ public class NetworkSheepPlayer : NetworkBehaviour
             rb.isKinematic = true;
         }
 
-        // Mark as dead
-        isDead = true;
+        // Play death effects if this is the local player
+        if (isLocalPlayer && playerController != null)
+        {
+            // Play explosion effect without triggering more network messages
+            playerController.PlayDeathEffects();
+
+            // Show defeat UI
+            if (gameManager != null && gameManager.defeatPanel != null)
+            {
+                gameManager.defeatPanel.SetActive(true);
+
+                // Show main menu button
+                if (gameManager.mainMenuButton != null)
+                {
+                    gameManager.mainMenuButton.gameObject.SetActive(true);
+                }
+            }
+        }
+
+        // If not server, notify game manager directly on client
+        if (!isServer && gameManager != null && gameManager.activeSheep.Contains(gameObject))
+        {
+            gameManager.SheepDied(gameObject);
+        }
     }
 }
