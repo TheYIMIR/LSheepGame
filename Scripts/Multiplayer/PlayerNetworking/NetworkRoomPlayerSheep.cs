@@ -8,9 +8,6 @@ public class NetworkRoomPlayerSheep : NetworkRoomPlayer
     [SyncVar(hook = nameof(OnPlayerNameChanged))]
     public string playerName = "Sheep";
 
-    [SyncVar]
-    public bool hasVoted = false;
-
     [Header("UI References")]
     public Text playerNameText;
     public Text readyStatusText;
@@ -33,6 +30,13 @@ public class NetworkRoomPlayerSheep : NetworkRoomPlayer
     {
         base.ReadyStateChanged(oldReadyState, newReadyState);
         UpdateUI();
+
+        // Notify the lobby manager about ready state changes
+        NetworkLobbyManager lobbyManager = FindObjectOfType<NetworkLobbyManager>();
+        if (lobbyManager != null)
+        {
+            lobbyManager.CheckReadyToStart();
+        }
     }
 
     // Called when the player enters the room
@@ -77,22 +81,5 @@ public class NetworkRoomPlayerSheep : NetworkRoomPlayer
             return;
 
         playerName = newName;
-    }
-
-    // Command to vote to start the game
-    [Command]
-    public void CmdVoteToStart()
-    {
-        if (!hasVoted)
-        {
-            hasVoted = true;
-
-            SheepNetworkManager netManager = NetworkManager.singleton as SheepNetworkManager;
-            if (netManager != null)
-            {
-                // This could trigger a countdown or other action
-                Debug.Log($"Player {playerName} voted to start");
-            }
-        }
     }
 }

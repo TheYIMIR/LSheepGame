@@ -15,9 +15,6 @@ public class NetworkLobbyManager : NetworkBehaviour
     [SyncVar(hook = nameof(OnCountdownActiveChanged))]
     public bool countdownActive = false;
 
-    [SyncVar(hook = nameof(OnVotesChanged))]
-    public int votesToStart = 0;
-
     [SyncVar(hook = nameof(OnGameStartedChanged))]
     public bool gameStarted = false;
 
@@ -25,6 +22,7 @@ public class NetworkLobbyManager : NetworkBehaviour
     public Text countdownText;
     public Text votesText;
     public Text playersCountText;
+    public Button backButton;
 
     // Reference to the SheepNetworkManager 
     private SheepNetworkManager networkManager;
@@ -95,6 +93,12 @@ public class NetworkLobbyManager : NetworkBehaviour
         {
             lobbyUI.UpdateCountdownUI(currentCountdown);
         }
+
+        // Check if game has started and update UI accordingly
+        if (gameStarted && backButton != null)
+        {
+            backButton.GetComponentInChildren<Text>().text = "Disconnect";
+        }
     }
 
     // Initialize UI from sync vars when client starts
@@ -105,14 +109,33 @@ public class NetworkLobbyManager : NetworkBehaviour
             // Update countdown
             lobbyUI.UpdateCountdownUI(currentCountdown);
 
-            // Update votes if we have player counts
+            // Update votes/readiness if we have player counts
             if (networkManager != null)
             {
                 int playerCount = networkManager.CountConnectedPlayers();
-                lobbyUI.UpdateVotesUI(votesToStart, playerCount);
+                int readyCount = CountReadyPlayers();
+                lobbyUI.UpdateVotesUI(readyCount, playerCount);
                 lobbyUI.UpdatePlayersUI(playerCount);
             }
         }
+    }
+
+    // Count how many players are ready
+    int CountReadyPlayers()
+    {
+        int readyCount = 0;
+
+        // Find all network room players and count ready ones
+        NetworkRoomPlayer[] roomPlayers = FindObjectsOfType<NetworkRoomPlayer>();
+        foreach (NetworkRoomPlayer player in roomPlayers)
+        {
+            if (player.readyToBegin)
+            {
+                readyCount++;
+            }
+        }
+
+        return readyCount;
     }
 
     // Updates the server info for UI
@@ -121,17 +144,20 @@ public class NetworkLobbyManager : NetworkBehaviour
         if (!isServer) return;
 
         int playerCount = 0;
+        int readyCount = 0;
 
         // Use the counting method from network manager
         if (networkManager != null)
         {
             playerCount = networkManager.CountConnectedPlayers();
+            readyCount = CountReadyPlayers();
+
             RpcUpdatePlayerCount(playerCount);
 
-            // Update votes UI
+            // Update votes/ready UI
             if (playerCount > 0)
             {
-                RpcUpdateVoteCount(votesToStart, playerCount);
+                RpcUpdateVoteCount(readyCount, playerCount);
             }
         }
     }
@@ -143,17 +169,6 @@ public class NetworkLobbyManager : NetworkBehaviour
         {
             RpcUpdatePlayerCount(playerCount);
         }
-    }
-
-    // Server method to register a vote
-    public void PlayerVoted()
-    {
-        if (!isServer) return;
-
-        votesToStart++;
-
-        // Check if enough votes to skip
-        CheckVoteThreshold();
     }
 
     // Start the countdown
@@ -194,25 +209,26 @@ public class NetworkLobbyManager : NetworkBehaviour
         if (!isServer) return;
 
         gameStarted = false;
-        votesToStart = 0;
         countdownActive = false;
         currentCountdown = NetworkGameConfig.LOBBY_COUNTDOWN_SECONDS;
     }
 
-    // Check if enough votes to skip countdown
-    void CheckVoteThreshold()
+    // Check if enough players are ready to start the game
+    public void CheckReadyToStart()
     {
         if (!isServer) return;
 
         int playerCount = 0;
+        int readyCount = 0;
 
         // Use the improved counting method from network manager
         if (networkManager != null)
         {
             playerCount = networkManager.CountConnectedPlayers();
+            readyCount = CountReadyPlayers();
 
-            // Debug log the votes
-            Debug.Log($"Votes: {votesToStart}/{playerCount}");
+            // Debug log the ready count
+            Debug.Log($"Ready Players: {readyCount}/{playerCount}");
         }
         else
         {
@@ -221,10 +237,10 @@ public class NetworkLobbyManager : NetworkBehaviour
 
         if (playerCount < 1) return;
 
-        float votePercentage = (float)votesToStart / playerCount;
+        float readyPercentage = (float)readyCount / playerCount;
 
-        // If at least 50% voted to start
-        if (votePercentage >= NetworkGameConfig.VOTE_SKIP_PERCENTAGE)
+        // If at least 50% are ready
+        if (readyPercentage >= NetworkGameConfig.VOTE_SKIP_PERCENTAGE)
         {
             // Set countdown to 3 seconds
             currentCountdown = NetworkGameConfig.VOTE_SKIP_COUNTDOWN_SECONDS;
@@ -233,8 +249,8 @@ public class NetworkLobbyManager : NetworkBehaviour
             RpcVoteThresholdReached();
         }
 
-        // Update the UI with current vote count
-        RpcUpdateVoteCount(votesToStart, playerCount);
+        // Update the UI with current ready count
+        RpcUpdateVoteCount(readyCount, playerCount);
     }
 
     // Called when countdown changes
@@ -261,45 +277,46 @@ public class NetworkLobbyManager : NetworkBehaviour
         }
     }
 
-    // Called when vote count changes
-    void OnVotesChanged(int oldValue, int newValue)
-    {
-        // Update is handled through CheckVoteThreshold and RpcUpdateVoteCount
-        Debug.Log($"Votes changed from {oldValue} to {newValue}");
-
-        // Update all clients with new vote count
-        if (isServer && networkManager != null)
-        {
-            int playerCount = networkManager.CountConnectedPlayers();
-            RpcUpdateVoteCount(newValue, playerCount);
-        }
-    }
-
     // Called when game started changes
     void OnGameStartedChanged(bool oldValue, bool newValue)
     {
-        // React to game started state change (could show "Game Starting..." text)
-        if (newValue && !oldValue && !isServer && lobbyUI != null)
+        // React to game started state change
+        if (newValue && !oldValue)
         {
-            // Show game starting message
-            lobbyUI.countdownText.text = "Game Starting...";
+            // Game has started, update UI
+            if (lobbyUI != null)
+            {
+                lobbyUI.countdownText.text = "Game Starting...";
+
+                // Update back button text
+                if (lobbyUI.backButton != null)
+                {
+                    lobbyUI.backButton.GetComponentInChildren<Text>().text = "Disconnect";
+                }
+            }
+
+            // Change the back button text
+            if (backButton != null)
+            {
+                backButton.GetComponentInChildren<Text>().text = "Disconnect";
+            }
         }
     }
 
     // Client RPC to update vote count
     [ClientRpc]
-    void RpcUpdateVoteCount(int votes, int playerCount)
+    void RpcUpdateVoteCount(int readyCount, int playerCount)
     {
         if (playerCount <= 0) return;
 
         if (lobbyUI != null)
         {
-            lobbyUI.UpdateVotesUI(votes, playerCount);
+            lobbyUI.UpdateVotesUI(readyCount, playerCount);
         }
         else if (votesText != null)
         {
-            float percentage = (float)votes / playerCount * 100f;
-            votesText.text = $"Votes: {votes}/{playerCount} ({Mathf.FloorToInt(percentage)}%)";
+            float percentage = (float)readyCount / playerCount * 100f;
+            votesText.text = $"Ready: {readyCount}/{playerCount} ({Mathf.FloorToInt(percentage)}%)";
         }
     }
 
@@ -320,7 +337,8 @@ public class NetworkLobbyManager : NetworkBehaviour
         // Also update votes display with new player count
         if (isServer)
         {
-            RpcUpdateVoteCount(votesToStart, playerCount);
+            int readyCount = CountReadyPlayers();
+            RpcUpdateVoteCount(readyCount, playerCount);
         }
 
         Debug.Log($"Updated player count to: {playerCount}");
@@ -330,7 +348,7 @@ public class NetworkLobbyManager : NetworkBehaviour
     [ClientRpc]
     void RpcVoteThresholdReached()
     {
-        Debug.Log("Vote threshold reached! Game starting soon...");
+        Debug.Log("Ready threshold reached! Game starting soon...");
 
         // Update UI with skipped countdown
         if (lobbyUI != null)

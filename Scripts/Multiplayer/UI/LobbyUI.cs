@@ -88,23 +88,34 @@ public class LobbyUI : MonoBehaviour
 
     void Update()
     {
-        // Check connection status
+        // Check connection status and game started status
         if (NetworkClient.active)
         {
-            // Enable vote button once connected
-            if (voteButton != null)
+            // Check if game has already started
+            bool gameStarted = false;
+            if (lobbyManager != null)
             {
-                voteButton.interactable = true;
+                gameStarted = lobbyManager.gameStarted;
 
-                // Disable if already voted
-                if (NetworkClient.connection != null && NetworkClient.connection.identity != null)
+                // Update back button text if game has started
+                if (gameStarted && backButton != null)
                 {
-                    NetworkSheepPlayer localPlayer = NetworkClient.connection.identity.GetComponent<NetworkSheepPlayer>();
-                    if (localPlayer != null && localPlayer.hasVoted)
-                    {
-                        voteButton.interactable = false;
-                    }
+                    backButton.GetComponentInChildren<Text>().text = "Disconnect";
                 }
+            }
+
+            // Find local player
+            NetworkRoomPlayer localRoomPlayer = null;
+            if (NetworkClient.connection != null && NetworkClient.connection.identity != null)
+            {
+                localRoomPlayer = NetworkClient.connection.identity.GetComponent<NetworkRoomPlayer>();
+            }
+
+            // Enable vote button once connected (if game not started)
+            if (voteButton != null && !gameStarted && localRoomPlayer != null)
+            {
+                voteButton.interactable = !localRoomPlayer.readyToBegin;
+                voteButton.GetComponentInChildren<Text>().text = localRoomPlayer.readyToBegin ? "Ready" : "Vote Ready";
             }
         }
     }
@@ -138,17 +149,20 @@ public class LobbyUI : MonoBehaviour
 
     void OnVoteClicked()
     {
-        // Tell the network manager to register this player's vote
-        if (NetworkClient.active && NetworkClient.isConnected)
-        {
-            NetworkRoomPlayerSheep localPlayer = NetworkClient.connection.identity.GetComponent<NetworkRoomPlayerSheep>();
-            if (localPlayer != null)
-            {
-                localPlayer.CmdVoteToStart();
+        // Get local room player
+        if (NetworkClient.connection == null || NetworkClient.connection.identity == null)
+            return;
 
-                // Disable vote button
-                voteButton.interactable = false;
-            }
+        NetworkRoomPlayer roomPlayer = NetworkClient.connection.identity.GetComponent<NetworkRoomPlayer>();
+        if (roomPlayer != null && !roomPlayer.readyToBegin)
+        {
+            // Call the standard Mirror method to change ready state
+            // Note: This is part of the base NetworkRoomPlayer functionality
+            roomPlayer.CmdChangeReadyState(true);
+
+            // Update UI state immediately for better responsiveness
+            voteButton.interactable = false;
+            voteButton.GetComponentInChildren<Text>().text = "Ready";
         }
     }
 
@@ -215,15 +229,31 @@ public class LobbyUI : MonoBehaviour
 
     void OnBackClicked()
     {
-        // Stop any network connection
-        if (NetworkClient.active)
+        // Check if game has started
+        bool gameStarted = false;
+        if (lobbyManager != null)
         {
-            NetworkManager.singleton.StopClient();
+            gameStarted = lobbyManager.gameStarted;
         }
 
-        if (NetworkServer.active)
+        // Handle disconnect logic
+        if (gameStarted)
         {
-            NetworkManager.singleton.StopServer();
+            // If game is in progress, do a full disconnect
+            if (NetworkClient.active)
+            {
+                NetworkManager.singleton.StopClient();
+            }
+
+            if (NetworkServer.active)
+            {
+                NetworkManager.singleton.StopServer();
+            }
+        }
+        else if (NetworkClient.active)
+        {
+            // If in lobby, use standard Mirror functionality
+            NetworkManager.singleton.StopClient();
         }
 
         // Go back to main menu
@@ -279,11 +309,11 @@ public class LobbyUI : MonoBehaviour
         }
     }
 
-    public void UpdateVotesUI(int votes, int players)
+    public void UpdateVotesUI(int readyCount, int players)
     {
         if (votesText != null && players > 0)
         {
-            votesText.text = $"Votes: {votes}/{players} ({Mathf.Floor((float)votes / players * 100)}%)";
+            votesText.text = $"Ready: {readyCount}/{players} ({Mathf.Floor((float)readyCount / players * 100)}%)";
         }
     }
 

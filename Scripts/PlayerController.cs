@@ -148,6 +148,12 @@ public class PlayerController : SheepController
                 );
             }
         }
+
+        if (!isRecovering && !isCharging)
+        {
+            // Apply additional stabilization for smooth high-speed movement
+            ApplyAdditionalStabilizationAtSpeed(currentAngle);
+        }
     }
 
     IEnumerator Charge()

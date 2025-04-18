@@ -35,6 +35,9 @@ public class SheepNetworkManager : NetworkRoomManager
     // Dictionary to track player connections (only actual network clients)
     private Dictionary<int, NetworkConnection> playerConnections = new Dictionary<int, NetworkConnection>();
 
+    // Flag to track if a game is currently in progress
+    private bool gameInProgress = false;
+
     // Awake is called when the script instance is being loaded
     public override void Awake()
     {
@@ -120,7 +123,7 @@ public class SheepNetworkManager : NetworkRoomManager
     {
         // First, create the room player using the base method
         GameObject roomPlayerObj = base.OnRoomServerCreateRoomPlayer(conn);
-        
+
         if (roomPlayerObj != null)
         {
             // Add to our tracking dictionary (only if not already tracked)
@@ -129,7 +132,7 @@ public class SheepNetworkManager : NetworkRoomManager
                 playerConnections.Add(conn.connectionId, conn);
                 Debug.Log($"Added player connection {conn.connectionId}. Total players: {playerConnections.Count}");
             }
-            
+
             // Set the player name if we have a NetworkRoomPlayerSheep component
             NetworkRoomPlayerSheep roomPlayer = roomPlayerObj.GetComponent<NetworkRoomPlayerSheep>();
             if (roomPlayer != null)
@@ -138,7 +141,7 @@ public class SheepNetworkManager : NetworkRoomManager
                 roomPlayer.playerName = "Player_" + conn.connectionId;
             }
         }
-        
+
         return roomPlayerObj;
     }
 
@@ -175,6 +178,9 @@ public class SheepNetworkManager : NetworkRoomManager
         {
             gameManager.activeSheep.Add(playerObj);
         }
+
+        // Mark that a game is in progress
+        gameInProgress = true;
 
         return playerObj;
     }
@@ -222,22 +228,22 @@ public class SheepNetworkManager : NetworkRoomManager
     public override void OnRoomServerSceneChanged(string sceneName)
     {
         base.OnRoomServerSceneChanged(sceneName);
-        
+
         if (sceneName == NetworkGameConfig.GAME_SCENE_NAME)
         {
             Debug.Log("Game scene loaded - initializing network game");
-            
+
             // Find the GameManager
             GameManager gameManager = FindObjectOfType<GameManager>();
             if (gameManager != null)
             {
                 Debug.Log("Found GameManager - configuring for network play");
                 gameManager.isNetworkGame = true;
-                
+
                 // Calculate bots needed (99 if one player, 98 if two players, etc.)
                 int humanPlayerCount = CountConnectedPlayers();
                 int botsNeeded = 100 - humanPlayerCount;
-                
+
                 Debug.Log($"Spawning {botsNeeded} bots for {humanPlayerCount} human players");
                 gameManager.SpawnNetworkedSheep(botsNeeded);
             }
@@ -245,6 +251,46 @@ public class SheepNetworkManager : NetworkRoomManager
             {
                 Debug.LogError("Could not find GameManager in game scene!");
             }
+
+            // Mark game as in progress
+            gameInProgress = true;
+        }
+    }
+
+    // Custom method to handle returning to room or disconnecting
+    public void HandleReturnToRoomOrDisconnect()
+    {
+        // Check if a game is in progress
+        if (gameInProgress)
+        {
+            Debug.Log("Game in progress, disconnecting instead of returning to room");
+            DisconnectFromGame();
+        }
+        else
+        {
+            // No game in progress, proceed with normal return to room
+            if (NetworkServer.active && NetworkClient.active)
+            {
+                // Host mode, can call the original ReturnToRoomScene
+                base.ServerChangeScene(RoomScene);
+            }
+            else if (NetworkClient.active)
+            {
+                // Client only mode, disconnect since clients can't change scenes
+                StopClient();
+                SceneManager.LoadScene(NetworkGameConfig.MENU_SCENE_NAME);
+            }
+        }
+    }
+
+    // Handle when player readiness state changes
+    public void NotifyPlayerReadyChanged()
+    {
+        // Find the NetworkLobbyManager to update ready counts
+        NetworkLobbyManager lobbyManager = FindObjectOfType<NetworkLobbyManager>();
+        if (lobbyManager != null)
+        {
+            lobbyManager.CheckReadyToStart();
         }
     }
 
@@ -312,15 +358,15 @@ public class SheepNetworkManager : NetworkRoomManager
         // First check if we're the host - we always count as a player
         bool isHost = NetworkServer.active && NetworkClient.active;
         int hostCount = isHost ? 1 : 0;
-        
+
         // Get connected client count - if we're host, we're both server and client, so avoid double-counting
         int clientCount = playerConnections.Count;
-        
+
         // Calculate total players
         int totalPlayers = isHost ? Mathf.Max(hostCount, clientCount) : clientCount;
-        
+
         Debug.Log($"Counting players: Host={isHost}, HostCount={hostCount}, ClientCount={clientCount}, TotalPlayers={totalPlayers}");
-        
+
         return totalPlayers;
     }
 
@@ -339,15 +385,38 @@ public class SheepNetworkManager : NetworkRoomManager
     {
         // Count how many human players we have
         int humanPlayerCount = CountConnectedPlayers();
-        
+
         // Calculate how many bots we need for a total of 100 sheep
         int totalDesiredSheep = 100;
         int botsNeeded = Mathf.Max(0, totalDesiredSheep - humanPlayerCount);
-        
+
         // Set the bot count
         botCount = botsNeeded;
-        
+
         Debug.Log($"Configured game with {humanPlayerCount} human players and {botsNeeded} bots for a total of {totalDesiredSheep} sheep");
+    }
+
+    // Method to handle disconnect from the running game
+    public void DisconnectFromGame()
+    {
+        if (NetworkServer.active && NetworkClient.active)
+        {
+            StopHost();
+        }
+        else if (NetworkClient.active)
+        {
+            StopClient();
+        }
+        else if (NetworkServer.active)
+        {
+            StopServer();
+        }
+
+        // Reset game in progress flag
+        gameInProgress = false;
+
+        // Go back to main menu
+        SceneManager.LoadScene(NetworkGameConfig.MENU_SCENE_NAME);
     }
 
     [ContextMenu("Debug Connection Info")]
@@ -361,6 +430,7 @@ public class SheepNetworkManager : NetworkRoomManager
         Debug.Log($"Player Connections: {playerConnections.Count}");
         Debug.Log($"NetworkServer.connections: {NetworkServer.connections.Count}");
         Debug.Log($"Connected Players: {CountConnectedPlayers()}");
+        Debug.Log($"Game In Progress: {gameInProgress}");
 
         if (NetworkClient.localPlayer != null)
         {

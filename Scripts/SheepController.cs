@@ -38,6 +38,13 @@ public abstract class SheepController : MonoBehaviour
     public float impactCenterOfMassYOffset = 0.5f;
     public float centerOfMassRecoveryTime = 0.8f;
 
+    [Header("Network Smoothing")]
+    public float positionSmoothTime = 0.1f; // Time to smooth position transitions
+    public float rotationSmoothTime = 0.1f; // Time to smooth rotation transitions
+    public bool useNetworkSmoothing = true; // Toggle for network smoothing
+    public float networkSmoothingThreshold = 0.15f; // Distance threshold for position smoothing
+    public float maxSmoothingSpeed = 10f; // Maximum velocity for smoothing
+
     [Header("References")]
     public GameObject explosionPrefab;
     public AudioClip baaSound;
@@ -76,6 +83,14 @@ public abstract class SheepController : MonoBehaviour
     protected bool isGrounded = false;
     protected GameManager gameManager;
 
+    // Network smoothing variables
+    protected Vector3 targetPosition;
+    protected Quaternion targetRotation;
+    protected Vector3 positionVelocity; // For SmoothDamp
+    protected Vector3 previousPosition;
+    protected float previousFixedTime;
+    protected bool hasInitialPosition = false;
+
     // Status
     protected bool isDead = false;
     protected bool movementLocked = true;
@@ -110,6 +125,13 @@ public abstract class SheepController : MonoBehaviour
 
         // Optimize physics settings for stability
         rb.maxAngularVelocity = 7;
+
+        // Initialize network smoothing variables
+        targetPosition = transform.position;
+        targetRotation = transform.rotation;
+        previousPosition = transform.position;
+        previousFixedTime = Time.time;
+        hasInitialPosition = true;
 
         // Start with movement locked - will be unlocked by the GameManager
         SetMovementLocked(true);
@@ -174,6 +196,81 @@ public abstract class SheepController : MonoBehaviour
         }
     }
 
+    // Update is called once per frame
+    protected virtual void Update()
+    {
+        if (isDead || movementLocked) return;
+
+        // Only apply network smoothing on clients for non-local entities
+        if (isNetworkMode && !ShouldHandlePhysics() && useNetworkSmoothing)
+        {
+            PerformNetworkSmoothing();
+        }
+    }
+
+    // Handle network position smoothing
+    protected virtual void PerformNetworkSmoothing()
+    {
+        // Skip if we don't have a target position or we shouldn't be smoothing
+        if (!hasInitialPosition) return;
+
+        // Calculate how much the position has changed
+        float distanceToTarget = Vector3.Distance(transform.position, targetPosition);
+
+        // Only smooth if distance is above threshold but not too extreme (which could indicate teleportation)
+        if (distanceToTarget > networkSmoothingThreshold && distanceToTarget < 5f)
+        {
+            // Smoothly move toward target position
+            transform.position = Vector3.SmoothDamp(
+                transform.position,
+                targetPosition,
+                ref positionVelocity,
+                positionSmoothTime,
+                maxSmoothingSpeed);
+
+            // Smoothly rotate toward target rotation
+            transform.rotation = Quaternion.Slerp(
+                transform.rotation,
+                targetRotation,
+                Time.deltaTime / rotationSmoothTime);
+        }
+        // For large distances, just snap to avoid elastic band effect
+        else if (distanceToTarget >= 5f)
+        {
+            transform.position = targetPosition;
+            transform.rotation = targetRotation;
+            positionVelocity = Vector3.zero;
+        }
+    }
+
+    // Set the target position and rotation for network smoothing
+    public void SetNetworkTarget(Vector3 position, Quaternion rotation)
+    {
+        if (!useNetworkSmoothing) return;
+
+        // Calculate estimated velocity from network updates
+        float deltaTime = Time.time - previousFixedTime;
+        if (deltaTime > 0)
+        {
+            // Use position change to estimate current velocity
+            Vector3 estimatedVelocity = (position - previousPosition) / deltaTime;
+
+            // Apply estimated velocity to position for better prediction
+            targetPosition = position + (estimatedVelocity * Time.deltaTime);
+        }
+        else
+        {
+            targetPosition = position;
+        }
+
+        targetRotation = rotation;
+        hasInitialPosition = true;
+
+        // Store previous values for next calculation
+        previousPosition = position;
+        previousFixedTime = Time.time;
+    }
+
     protected virtual void FixedUpdate()
     {
         if (isDead || movementLocked) return;
@@ -211,6 +308,13 @@ public abstract class SheepController : MonoBehaviour
 
         // Perform derived class specific physics updates
         PerformStatePhysicsUpdate(currentAngle);
+
+        // If this is a server or local authority, record position for clients
+        if (isNetworkMode && ShouldHandlePhysics())
+        {
+            // This position/rotation will be sent to other clients via NetworkTransform component
+            // or custom sync code in the derived classes
+        }
     }
 
     protected virtual bool ShouldHandlePhysics()
@@ -352,23 +456,38 @@ public abstract class SheepController : MonoBehaviour
         if (direction == Vector3.zero)
             return;
 
+        // Get current horizontal velocity and speed
+        Vector3 horizontalVelocity = new Vector3(rb.velocity.x, 0, rb.velocity.z);
+        float currentSpeed = horizontalVelocity.magnitude;
+        
+        // Reduce turn speed at higher speeds for more natural movement
+        float speedFactor = currentSpeed / maxSpeed;
+        float adjustedTurnSpeed = turnSpeed * Mathf.Lerp(1f, 0.5f, speedFactor);
+
         // Calculate angle to target
         float angleToTarget = Vector3.Angle(transform.forward, direction);
 
-        // Significantly reduce rotation speed for sharp turns
-        float adjustedRotationSpeed = turnSpeed;
+        // Significantly reduce rotation speed for sharp turns to avoid jerky movement
         if (angleToTarget > 60f)
         {
-            adjustedRotationSpeed *= 0.5f; // Much slower for sharp turns
+            adjustedTurnSpeed *= 0.4f; // Much slower for sharp turns
         }
         else if (angleToTarget > 30f)
         {
-            adjustedRotationSpeed *= 0.7f; // Somewhat slower for medium turns
+            adjustedTurnSpeed *= 0.6f; // Somewhat slower for medium turns
+        }
+        
+        // Slow down during sharp turns to make movement more natural
+        if (angleToTarget > 45f && currentSpeed > maxSpeed * 0.5f)
+        {
+            // Apply braking force during sharp turns
+            float brakeFactor = Mathf.Lerp(0f, 0.3f, (angleToTarget - 45f) / 45f);
+            rb.AddForce(-horizontalVelocity.normalized * brakeFactor * accelerationForce, ForceMode.Force);
         }
 
         // Limit maximum turning rate to make it more natural
         float maxTurnPerFrame = 1.0f; // Degrees per frame
-        float maxRotation = maxTurnPerFrame * (adjustedRotationSpeed / 100f) * (Time.deltaTime * 60f); // Normalized for 60 fps
+        float maxRotation = maxTurnPerFrame * (adjustedTurnSpeed / 100f) * (Time.deltaTime * 60f); // Normalized for 60 fps
 
         // Calculate target rotation with limits
         Quaternion currentRotation = transform.rotation;
@@ -390,20 +509,86 @@ public abstract class SheepController : MonoBehaviour
 
         if (uprightness > 0.7f) // About 45 degrees from upright
         {
-            // Apply force
-            rb.AddForce(transform.forward * force, ForceMode.Acceleration);
-
-            // Limit speed
+            // Get current horizontal velocity
             Vector3 horizontalVelocity = new Vector3(rb.velocity.x, 0, rb.velocity.z);
-            if (horizontalVelocity.magnitude > maxSpeed)
+            float currentSpeed = horizontalVelocity.magnitude;
+            
+            // Calculate a smoother force application that decreases as we approach max speed
+            float speedFactor = 1f - Mathf.Clamp01(currentSpeed / maxSpeed);
+            float adjustedForce = force * Mathf.Lerp(0.5f, 1f, speedFactor);
+            
+            // Apply force with smooth falloff near max speed
+            rb.AddForce(transform.forward * adjustedForce, ForceMode.Acceleration);
+
+            // Apply more gentle speed limiting to avoid jerky motion
+            if (currentSpeed > maxSpeed)
             {
-                horizontalVelocity = horizontalVelocity.normalized * maxSpeed;
-                rb.velocity = new Vector3(horizontalVelocity.x, rb.velocity.y, horizontalVelocity.z);
+                // Calculate a damping factor - stronger the further we are over the speed limit
+                float overSpeedFactor = (currentSpeed - maxSpeed) / maxSpeed;
+                float dampingForce = overSpeedFactor * 0.8f;
+                
+                // Apply counter-force proportional to how much we're over the speed limit
+                Vector3 dampingDirection = -horizontalVelocity.normalized;
+                rb.AddForce(dampingDirection * force * dampingForce, ForceMode.Force);
             }
 
-            // Add stabilizing downward force
-            rb.AddForce(Vector3.down * force * 0.4f, ForceMode.Force);
+            // Add stabilizing downward force that increases with speed
+            float downForceFactor = Mathf.Lerp(0.2f, 0.5f, currentSpeed / maxSpeed);
+            rb.AddForce(Vector3.down * force * downForceFactor, ForceMode.Force);
         }
+    }
+
+    protected void ApplyAdditionalStabilizationAtSpeed(float currentAngle)
+    {
+        // Only apply if needed
+        if (rb.velocity.magnitude < maxSpeed * 0.6f) return;
+        
+        // Get current horizontal velocity
+        Vector3 horizontalVelocity = new Vector3(rb.velocity.x, 0, rb.velocity.z);
+        float currentSpeed = horizontalVelocity.magnitude;
+        
+        // Calculate how aligned we are with our velocity
+        float alignmentWithVelocity = Vector3.Dot(transform.forward.normalized, horizontalVelocity.normalized);
+        
+        // If moving fast and not aligned with velocity, apply stabilizing torque
+        if (currentSpeed > maxSpeed * 0.6f && alignmentWithVelocity < 0.8f)
+        {
+            // Calculate the rotation needed to align with velocity
+            Vector3 moveDirection = horizontalVelocity.normalized;
+            Quaternion targetRotation = Quaternion.LookRotation(moveDirection);
+            
+            // Apply a small torque to align with movement direction
+            Vector3 rotationDifference = CalculateTorqueToReachRotation(targetRotation);
+            float alignmentForce = Mathf.Lerp(0f, 0.5f, (currentSpeed - (maxSpeed * 0.6f)) / (maxSpeed * 0.4f));
+            
+            rb.AddTorque(rotationDifference * alignmentForce, ForceMode.Acceleration);
+        }
+        
+        // Additional downforce at high speeds
+        if (currentSpeed > maxSpeed * 0.8f)
+        {
+            // Apply extra downward force to prevent bouncing at high speeds
+            float downForce = Mathf.Lerp(0f, uprightForce * 0.5f, (currentSpeed - (maxSpeed * 0.8f)) / (maxSpeed * 0.2f));
+            rb.AddForce(Vector3.down * downForce, ForceMode.Force);
+        }
+    }
+
+    private Vector3 CalculateTorqueToReachRotation(Quaternion targetRotation)
+    {
+        // Calculate rotation difference
+        Quaternion rotationDifference = targetRotation * Quaternion.Inverse(transform.rotation);
+        
+        // Convert to axis angle representation
+        rotationDifference.ToAngleAxis(out float angle, out Vector3 axis);
+        
+        // Ensure angle is between -180 and 180 degrees
+        if (angle > 180f)
+        {
+            angle -= 360f;
+        }
+        
+        // Calculate required torque based on angle
+        return axis.normalized * (angle * Mathf.Deg2Rad);
     }
 
     // Method called when this sheep gets hit by another sheep
@@ -505,7 +690,7 @@ public abstract class SheepController : MonoBehaviour
         if (rb != null)
         {
             rb.isKinematic = true;
-            
+
             // Zero out velocities as well
             rb.velocity = Vector3.zero;
             rb.angularVelocity = Vector3.zero;

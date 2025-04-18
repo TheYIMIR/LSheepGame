@@ -14,10 +14,25 @@ public abstract class NetworkSheepController : NetworkBehaviour
     [SyncVar(hook = nameof(OnDeadStatusChanged))]
     public bool isDead = false;
 
+    [Header("Network Smoothing")]
+    public float positionSmoothTime = 0.1f;
+    public float rotationSmoothTime = 0.1f;
+    public float maxSmoothingSpeed = 10f;
+    public float networkSmoothingThreshold = 0.15f;
+
     // Reference to the base sheep controller component
     protected SheepController sheepController;
     protected Rigidbody rb;
     protected GameManager gameManager;
+
+    // Network movement variables
+    protected bool movementLocked = false;
+    protected Vector3 targetPosition;
+    protected Quaternion targetRotation;
+
+    // Network smoothing variables
+    protected Vector3 smoothVelocity;
+    protected float lastNetworkUpdateTime;
 
     protected virtual void Awake()
     {
@@ -51,7 +66,13 @@ public abstract class NetworkSheepController : NetworkBehaviour
         if (sheepController != null)
         {
             sheepController.SetMovementLocked(true);
+            movementLocked = true;
         }
+
+        // Initialize network smoothing
+        lastNetworkUpdateTime = Time.time;
+        targetPosition = transform.position;
+        targetRotation = transform.rotation;
     }
 
     public override void OnStartServer()
@@ -76,6 +97,20 @@ public abstract class NetworkSheepController : NetworkBehaviour
         {
             gameManager.activeSheep.Add(gameObject);
             Debug.Log($"Added to active list (delayed): {gameObject.name}");
+        }
+    }
+
+    // Set the target position and rotation for network smoothing
+    public virtual void SetNetworkTarget(Vector3 position, Quaternion rotation)
+    {
+        // Update the smoothing targets
+        targetPosition = position;
+        targetRotation = rotation;
+
+        // Pass these to the sheep controller for smoothing if it supports it
+        if (sheepController != null)
+        {
+            sheepController.SetNetworkTarget(position, rotation);
         }
     }
 
@@ -178,6 +213,8 @@ public abstract class NetworkSheepController : NetworkBehaviour
     {
         if (isServer) return; // Server already set this
 
+        movementLocked = locked;
+
         if (sheepController != null)
         {
             sheepController.SetMovementLocked(locked);
@@ -188,6 +225,8 @@ public abstract class NetworkSheepController : NetworkBehaviour
     [Server]
     public virtual void ServerSetLocked(bool locked)
     {
+        movementLocked = locked;
+
         if (sheepController != null)
         {
             sheepController.SetMovementLocked(locked);

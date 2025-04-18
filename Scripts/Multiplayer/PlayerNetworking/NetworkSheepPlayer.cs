@@ -27,12 +27,21 @@ public class NetworkSheepPlayer : NetworkSheepController
     private float positionThreshold = 0.1f;
     private float rotationThreshold = 2.0f;
 
-    // Client-synced transform
+    // Network smoothing parameters
+    [Header("Network Smoothing")]
     [SyncVar]
     private Vector3 serverPosition;
 
     [SyncVar]
     private Quaternion serverRotation;
+
+    [SyncVar]
+    private Vector3 serverVelocity;
+
+    // Last sent values for delta compression
+    private Vector3 lastSentPosition;
+    private Quaternion lastSentRotation;
+    private Vector3 lastSentVelocity;
 
     protected override void Awake()
     {
@@ -73,6 +82,11 @@ public class NetworkSheepPlayer : NetworkSheepController
     {
         base.OnStartClient();
 
+        // Initialize network smoothing values
+        serverPosition = transform.position;
+        serverRotation = transform.rotation;
+        serverVelocity = Vector3.zero;
+
         // Disable player controller on non-local clients
         if (!isLocalPlayer && playerController != null)
         {
@@ -96,6 +110,15 @@ public class NetworkSheepPlayer : NetworkSheepController
             {
                 lastSyncTime = Time.time;
                 SyncTransformToServer();
+            }
+        }
+        else if (!isLocalPlayer && !isServer)
+        {
+            // For remote players, update position based on network data
+            if (rb != null && serverPosition != Vector3.zero)
+            {
+                // Let the base SheepController handle the smoothing with our target values
+                SetNetworkTarget(serverPosition, serverRotation);
             }
         }
     }
@@ -127,18 +150,6 @@ public class NetworkSheepPlayer : NetworkSheepController
             return;
 
         playerName = newName;
-    }
-
-    // Command to register a vote
-    [Command]
-    public void CmdVote()
-    {
-        if (!hasVoted)
-        {
-            hasVoted = true;
-
-            // Inform any vote tracking system if needed
-        }
     }
 
     // Command to start charging
@@ -176,38 +187,60 @@ public class NetworkSheepPlayer : NetworkSheepController
     // Sync transform from client to server
     void SyncTransformToServer()
     {
+        if (!rb) return;
+
         // Only send if position or rotation changed significantly
         Vector3 position = transform.position;
         Quaternion rotation = transform.rotation;
+        Vector3 velocity = rb.velocity;
 
-        if (Vector3.Distance(position, serverPosition) > positionThreshold ||
-            Quaternion.Angle(rotation, serverRotation) > rotationThreshold)
+        bool positionChanged = Vector3.Distance(position, lastSentPosition) > positionThreshold;
+        bool rotationChanged = Quaternion.Angle(rotation, lastSentRotation) > rotationThreshold;
+        bool velocityChanged = Vector3.Distance(velocity, lastSentVelocity) > 1.0f;
+
+        if (positionChanged || rotationChanged || velocityChanged)
         {
-            CmdSendTransformToServer(position, rotation);
+            CmdSendTransformToServer(position, rotation, velocity);
+
+            // Update last sent values
+            lastSentPosition = position;
+            lastSentRotation = rotation;
+            lastSentVelocity = velocity;
         }
     }
 
     // Command to send transform to server
     [Command]
-    void CmdSendTransformToServer(Vector3 position, Quaternion rotation)
+    void CmdSendTransformToServer(Vector3 position, Quaternion rotation, Vector3 velocity)
     {
         // Update server-side values
         serverPosition = position;
         serverRotation = rotation;
+        serverVelocity = velocity;
 
         // Broadcast to other clients
-        RpcSyncTransformToClients(position, rotation);
+        RpcSyncTransformToClients(position, rotation, velocity);
     }
 
     // RPC to sync transform to all clients
     [ClientRpc]
-    void RpcSyncTransformToClients(Vector3 position, Quaternion rotation)
+    void RpcSyncTransformToClients(Vector3 position, Quaternion rotation, Vector3 velocity)
     {
         // Only apply to remote players
         if (!isLocalPlayer)
         {
-            transform.position = position;
-            transform.rotation = rotation;
+            // Update synced values
+            serverPosition = position;
+            serverRotation = rotation;
+            serverVelocity = velocity;
+
+            // For prediction, apply velocity in the Update function
+            if (rb != null && rb.isKinematic)
+            {
+                // If using kinematic rigidbody, directly update position
+                SetNetworkTarget(position, rotation);
+            }
+            // Otherwise, the Update method will handle smoothing with these target values
         }
     }
 

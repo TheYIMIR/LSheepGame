@@ -28,6 +28,22 @@ public class NetworkAISheep : NetworkSheepController
     [SyncVar(hook = nameof(OnTargetPositionChanged))]
     private Vector3 syncedTargetPosition;
 
+    // Network smoothing variables
+    [SyncVar]
+    private Vector3 serverPosition;
+
+    [SyncVar]
+    private Quaternion serverRotation;
+
+    [SyncVar]
+    private Vector3 serverVelocity;
+
+    // Smoothing parameters
+    private float syncInterval = 0.1f; // How often to sync transform (10 times per second)
+    private float lastSyncTime = 0f;
+    private Vector3 lastSentPosition;
+    private Quaternion lastSentRotation;
+
     protected override void Awake()
     {
         base.Awake();
@@ -42,6 +58,54 @@ public class NetworkAISheep : NetworkSheepController
         if (isServer)
         {
             currentStateInt = (int)AIPlayerController.AIState.Wander;
+        }
+
+        // Initialize network smoothing values
+        serverPosition = transform.position;
+        serverRotation = transform.rotation;
+        lastSentPosition = transform.position;
+        lastSentRotation = transform.rotation;
+    }
+
+    void Update()
+    {
+        // For server, sync transform to clients periodically
+        if (isServer && !isDead && !movementLocked)
+        {
+            if (Time.time > lastSyncTime + syncInterval)
+            {
+                lastSyncTime = Time.time;
+                SyncTransformToClients();
+            }
+        }
+        // For clients, apply smoothing for remote AI sheep
+        else if (!isServer && !isDead)
+        {
+            // Apply network smoothing for position
+            SetNetworkTarget(serverPosition, serverRotation);
+        }
+    }
+
+    // Server to client transform synchronization
+    void SyncTransformToClients()
+    {
+        if (!rb) return;
+
+        Vector3 position = transform.position;
+        Quaternion rotation = transform.rotation;
+
+        // Only sync if there's meaningful change to reduce network traffic
+        if (Vector3.Distance(position, lastSentPosition) > 0.1f ||
+            Quaternion.Angle(rotation, lastSentRotation) > 2.0f)
+        {
+            // Update the synced values
+            serverPosition = position;
+            serverRotation = rotation;
+            serverVelocity = rb.velocity;
+
+            // Update the last sent values
+            lastSentPosition = position;
+            lastSentRotation = rotation;
         }
     }
 
