@@ -3,37 +3,12 @@ using System.Collections.Generic;
 using UnityEngine;
 using Mirror;
 
-public class AIPlayerController : MonoBehaviour
+/// <summary>
+/// AI controller for sheep in the game.
+/// Handles AI behavior and decision making while inheriting physics from SheepController.
+/// </summary>
+public class AIPlayerController : SheepController
 {
-    [Header("Movement Settings")]
-    public float accelerationForce = 22f;
-    public float maxSpeed = 9f;
-    public float rotationSpeed = 130f;
-    public float chargePower = 10f;
-    public float chargeCooldown = 2f;
-
-    [Header("Stability & Physics Settings")]
-    public float centerOfMassHeight = -0.3f; // Lowered center of mass for stability
-    public float uprightForce = 7f; // Force keeping the sheep upright
-    public float groundCheckDistance = 0.3f; // Distance to check for ground
-    public LayerMask groundLayer; // Layer for the ground
-    public float groundedDrag = 0.8f; // Drag when on ground
-    public float airDrag = 0.2f; // Drag when in air
-
-    [Header("Advanced Stability")]
-    public bool useStabilizationRays = true; // Use raycasts for extra stability
-    public float stabilizationForce = 12f; // Force for ray-based stabilization
-    public float maxTippingVelocity = 18f; // Speed where tipping protection is reduced
-    public float selfRightingSpeed = 4f; // How fast the sheep self-rights
-
-    [Header("Death Settings")]
-    public float deathAngle = 85f; // Angle in degrees where sheep dies (laying on back)
-    public float deathConfirmTime = 0.5f; // Time sheep must be on back before dying
-
-    [Header("Impact Settings")]
-    public float impactCenterOfMassYOffset = 0.5f; // How much to shift center of mass up on impact
-    public float centerOfMassRecoveryTime = 0.8f; // How long until center of mass returns to normal
-
     [Header("AI Behavior Settings")]
     public float detectionRadius = 6f;
     public float minFleeDistance = 3f;
@@ -43,53 +18,11 @@ public class AIPlayerController : MonoBehaviour
     public float fleeChance = 0.3f; // Chance to flee instead of attack after spotting a target
     public float behaviorChangeInterval = 3f; // How often the AI can change its mind
     public float chargeDistance = 4f; // Distance at which to initiate a charge
+    public float chargeTime = 0.3f; // Brief charge-up time
     public LayerMask sheepLayerMask;
 
-    [Header("References")]
-    public GameObject explosionPrefab;
-    public AudioClip baaSound;
-    public AudioClip explosionSound;
-
-    [Header("Audio Settings")]
-    [Range(0.5f, 1.5f)]
-    public float minPitch = 0.8f;
-    [Range(0.5f, 1.5f)]
-    public float maxPitch = 1.2f;
-    public float audioSpatialBlend = 1.0f; // 1.0 = fully 3D sound
-
-    [Header("Audio Range and Volume Settings")]
-    [Tooltip("Volume of the baa sound (0-1)")]
-    [Range(0f, 1f)]
-    public float baaVolume = 0.8f;
-    [Tooltip("Minimum distance at which the baa sound can be heard at full volume")]
-    public float baaMinDistance = 1f;
-    [Tooltip("Maximum distance at which the baa sound can be heard before fading out completely")]
-    public float baaMaxDistance = 20f;
-    [Tooltip("How quickly the baa sound fades with distance")]
-    public AnimationCurve baaRolloffCurve = AnimationCurve.Linear(0f, 1f, 1f, 0f);
-
-    [Tooltip("Volume of the explosion sound (0-1)")]
-    [Range(0f, 1f)]
-    public float explosionVolume = 1.0f;
-    [Tooltip("Minimum distance at which the explosion sound can be heard at full volume")]
-    public float explosionMinDistance = 1f;
-    [Tooltip("Maximum distance at which the explosion sound can be heard before fading out completely")]
-    public float explosionMaxDistance = 50f;
-    [Tooltip("How quickly the explosion sound fades with distance")]
-    public AnimationCurve explosionRolloffCurve = AnimationCurve.Linear(0f, 1f, 1f, 0f);
-
-    [Header("Network Settings")]
-    public bool isNetworkMode = false;
-    private NetworkAISheep networkAI; // Reference to network component if present
-
-    // Components
-    private Rigidbody rb;
-    private AudioSource audioSource;
-    private float deathTimer = 0f;
-    private float behaviorTimer = 0f;
-    private Vector3 originalCenterOfMass;
-    private Vector3 impactCenterOfMass;
-    private bool centerOfMassShifted = false;
+    // Network component reference
+    private NetworkAISheep networkAI;
 
     // AI State variables
     public enum AIState { Wander, Chase, Charge, Flee, Recover }
@@ -97,118 +30,27 @@ public class AIPlayerController : MonoBehaviour
     private Vector3 targetPosition;
     private Transform targetSheep;
     private float stateTimer = 0f;
+    private float behaviorTimer = 0f;
     private bool hasSucessfullyHit = false;
-    private float lastCollisionTime = -10f;
-    private bool isGrounded = false;
+    private bool canCharge = true;
 
-    // Status
-    private bool isDead = false;
-
-    // Movement lock
-    private bool movementLocked = true;
-
-    // Cache game manager reference
-    private GameManager gameManager;
-
-    void Awake()
+    protected override void Awake()
     {
+        base.Awake();
+
         // Try to get network component if it exists
         networkAI = GetComponent<NetworkAISheep>();
-
-        // Check if we're in network mode
-        isNetworkMode = Mirror.NetworkManager.singleton != null &&
-                   (Mirror.NetworkClient.active || Mirror.NetworkServer.active);
     }
 
-    void Start()
+    protected override void Start()
     {
-        rb = GetComponent<Rigidbody>();
-        audioSource = GetComponent<AudioSource>();
-        gameManager = GameManager.Instance;
-
-        if (audioSource == null)
-        {
-            audioSource = gameObject.AddComponent<AudioSource>();
-        }
-
-        // Configure audio source for 3D sound
-        audioSource.spatialBlend = audioSpatialBlend;
-        audioSource.rolloffMode = AudioRolloffMode.Linear;
-        audioSource.minDistance = 10f;
-        audioSource.maxDistance = 40f;
-        audioSource.volume = 0.5f;
-
-        // Store original center of mass for later restoration
-        originalCenterOfMass = new Vector3(0, centerOfMassHeight, 0);
-        impactCenterOfMass = new Vector3(0, centerOfMassHeight + impactCenterOfMassYOffset, 0);
-
-        // Apply the lowered center of mass for stability
-        rb.centerOfMass = originalCenterOfMass;
-
-        // Optimize physics settings for stability
-        rb.maxAngularVelocity = 7;
+        base.Start();
 
         // Set initial wander target
         SetNewWanderTarget();
 
         // Initialize behavior timer with random offset to desynchronize AI behavior
         behaviorTimer = Random.Range(0f, behaviorChangeInterval);
-
-        // Start with movement locked - will be unlocked by the GameManager
-        SetMovementLocked(true);
-
-        // Check if game is already started (in case we join late)
-        CheckGameStarted();
-
-        // Make sure we're in the active sheep list
-        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
-        {
-            gameManager.activeSheep.Add(gameObject);
-        }
-    }
-
-    // Check if the game has already started when we join
-    void CheckGameStarted()
-    {
-        if (gameManager != null && gameManager.gameStarted)
-        {
-            // Game already started, unlock movement
-            SetMovementLocked(false);
-        }
-        else
-        {
-            // Start listening for game start event
-            StartCoroutine(CheckForGameStart());
-        }
-    }
-
-    // Coroutine to check for game start
-    IEnumerator CheckForGameStart()
-    {
-        while (movementLocked)
-        {
-            if (gameManager != null && gameManager.gameStarted)
-            {
-                SetMovementLocked(false);
-                yield break;
-            }
-            yield return new WaitForSeconds(0.2f);
-        }
-    }
-
-    // Method to lock/unlock movement - called by GameManager or NetworkManager
-    public void SetMovementLocked(bool locked)
-    {
-        movementLocked = locked;
-
-        // If locked, zero out velocity
-        if (locked && rb != null)
-        {
-            rb.velocity = Vector3.zero;
-            rb.angularVelocity = Vector3.zero;
-        }
-
-        Debug.Log($"AI movement {(locked ? "locked" : "unlocked")}");
     }
 
     void Update()
@@ -216,12 +58,9 @@ public class AIPlayerController : MonoBehaviour
         if (isDead || movementLocked) return;
 
         // In network mode, only the server controls AI behavior
-        if (isNetworkMode)
+        if (isNetworkMode && !NetworkServer.active)
         {
-            if (!NetworkServer.active)
-            {
-                return;
-            }
+            return;
         }
 
         // Update behavior timer
@@ -237,40 +76,24 @@ public class AIPlayerController : MonoBehaviour
         stateTimer -= Time.deltaTime;
     }
 
-    void FixedUpdate()
+    protected override bool ShouldHandlePhysics()
     {
-        if (isDead || movementLocked) return;
-
-        // In network mode, only the server controls AI physics
+        // For network mode, only server controls AI physics
         if (isNetworkMode && !NetworkServer.active)
         {
-            return;
+            return false;
         }
+        return true;
+    }
 
-        // Check if grounded
-        CheckGrounded();
+    protected override bool ShouldApplyStrongStabilization()
+    {
+        // Don't apply strong stabilization during charge
+        return currentState != AIState.Charge;
+    }
 
-        // Apply appropriate drag based on ground contact
-        rb.drag = isGrounded ? groundedDrag : airDrag;
-
-        // Death check - only proceed if AI has been upside down for a certain time
-        float uprightness = Vector3.Dot(transform.up, Vector3.up);
-        float currentAngle = Mathf.Acos(Mathf.Clamp01(uprightness)) * Mathf.Rad2Deg;
-
-        if (currentAngle > deathAngle)
-        {
-            deathTimer += Time.fixedDeltaTime;
-            if (deathTimer >= deathConfirmTime)
-            {
-                Die();
-                return;
-            }
-        }
-        else
-        {
-            deathTimer = 0f;
-        }
-
+    protected override void PerformStatePhysicsUpdate(float currentAngle)
+    {
         // Switch to recovery state if significantly tilted but not dead
         if (currentAngle > 50f && currentState != AIState.Recover)
         {
@@ -283,9 +106,6 @@ public class AIPlayerController : MonoBehaviour
                 networkAI.SyncAIState((int)currentState, stateTimer);
             }
         }
-
-        // Apply stabilization to keep the sheep upright
-        ApplyStabilization();
 
         // Execute current state behavior
         switch (currentState)
@@ -367,114 +187,6 @@ public class AIPlayerController : MonoBehaviour
     {
         currentState = (AIState)stateInt;
         stateTimer = timer;
-    }
-
-    void CheckGrounded()
-    {
-        isGrounded = Physics.Raycast(
-            transform.position,
-            Vector3.down,
-            groundCheckDistance,
-            groundLayer
-        );
-    }
-
-    void ApplyStabilization()
-    {
-        // Calculate how fast we're going (ground speed only)
-        Vector3 horizontalVelocity = new Vector3(rb.velocity.x, 0, rb.velocity.z);
-        float speedFactor = Mathf.Clamp01(horizontalVelocity.magnitude / maxTippingVelocity);
-
-        // The faster we go, the less upright force we apply (to allow fun knockovers from charges)
-        float upForce = uprightForce * (1f - speedFactor * 0.7f);
-
-        // Apply much weaker stabilization when recently hit
-        if (Time.time < lastCollisionTime + 1.0f)
-        {
-            // Reduce stabilization by 80% for a short time after being hit
-            upForce *= 0.2f;
-        }
-        else if (Time.time < lastCollisionTime + 2.0f)
-        {
-            // Gradually restore stability between 1-2 seconds after hit
-            float recoveryPhase = (Time.time - lastCollisionTime - 1.0f) / 1.0f; // 0 to 1
-            upForce *= Mathf.Lerp(0.2f, 1.0f, recoveryPhase);
-        }
-
-        // Only apply strong stabilization when not charging
-        if (currentState != AIState.Charge)
-        {
-            // Get current up vector
-            Vector3 currentUp = transform.up;
-
-            // Calculate the torque needed to keep sheep upright
-            Vector3 targetUp = Vector3.up;
-            Vector3 rotationAxis = Vector3.Cross(currentUp, targetUp);
-            float rotationAngle = Vector3.Angle(currentUp, targetUp);
-
-            // Apply self-righting torque (stronger when more tilted)
-            if (rotationAngle > 5f)
-            {
-                float torqueFactor = rotationAngle / 90f; // 0 to 1 based on tilt
-                rb.AddTorque(rotationAxis.normalized * torqueFactor * upForce * selfRightingSpeed, ForceMode.Force);
-            }
-
-            // Additional ray-based stability when needed
-            if (useStabilizationRays && isGrounded)
-            {
-                // Also reduce ray stabilization strength when recently hit
-                float rayStabStrength = stabilizationForce;
-                if (Time.time < lastCollisionTime + 1.5f)
-                {
-                    rayStabStrength *= 0.2f; // 80% reduction when recently hit
-                }
-
-                ApplyStabilizationRays(rayStabStrength);
-            }
-        }
-    }
-
-    void ApplyStabilizationRays(float stabilizationStrength)
-    {
-        // Cast rays from the sides of the sheep to find potential tipping points
-        Vector3 right = transform.right;
-        Vector3 left = -transform.right;
-
-        float rayLength = 1f;
-        bool hitRight = Physics.Raycast(transform.position, right, out RaycastHit rightHit, rayLength, groundLayer);
-        bool hitLeft = Physics.Raycast(transform.position, left, out RaycastHit leftHit, rayLength, groundLayer);
-
-        // If one side is going to hit the ground but not the other, apply counter-force
-        if (hitRight && !hitLeft && rightHit.distance < 0.5f)
-        {
-            // About to tip right, push back left
-            rb.AddForce(-right * stabilizationStrength, ForceMode.Force);
-        }
-        else if (hitLeft && !hitRight && leftHit.distance < 0.5f)
-        {
-            // About to tip left, push back right
-            rb.AddForce(-left * stabilizationStrength, ForceMode.Force);
-        }
-    }
-
-    void ApplyRecoveryForces()
-    {
-        // Calculate recovery direction
-        Vector3 currentUp = transform.up;
-        Vector3 targetUp = Vector3.up;
-        Vector3 rotationAxis = Vector3.Cross(currentUp, targetUp);
-
-        // Apply strong self-righting torque
-        float upFactor = Vector3.Dot(transform.up, Vector3.up);
-        float recoveryStrength = Mathf.Clamp01(1f - upFactor) * 2f; // Stronger when more tilted
-
-        rb.AddTorque(rotationAxis.normalized * uprightForce * recoveryStrength, ForceMode.Force);
-
-        // Add a bit of upward force but not enough to make it fly
-        if (transform.position.y < 0.5f)
-        {
-            rb.AddForce(Vector3.up * uprightForce * 0.5f, ForceMode.Force);
-        }
     }
 
     void EvaluateBehavior()
@@ -887,7 +599,7 @@ public class AIPlayerController : MonoBehaviour
 
         // Set charge state with short delay
         ChangeState(AIState.Charge);
-        stateTimer = 0.3f; // Brief charge-up time
+        stateTimer = chargeTime; // Brief charge-up time
 
         // Reset hit flag
         hasSucessfullyHit = false;
@@ -914,77 +626,11 @@ public class AIPlayerController : MonoBehaviour
 
         // Apply a strong forward force
         rb.AddForce(transform.forward * chargePower, ForceMode.Impulse);
-
-        // Allow more tipping during charge
-        lastCollisionTime = Time.time;
     }
 
     void Charge()
     {
         ExecuteCharge();
-    }
-
-    void RotateTowardsTarget(Vector3 targetPos, float turnSpeed)
-    {
-        // Calculate direction to target
-        Vector3 direction = targetPos - transform.position;
-        direction.y = 0; // Keep rotation on horizontal plane
-
-        // Skip if direction is zero
-        if (direction == Vector3.zero)
-            return;
-
-        // Calculate angle to target
-        float angleToTarget = Vector3.Angle(transform.forward, direction);
-
-        // Significantly reduce rotation speed for sharp turns
-        float adjustedRotationSpeed = turnSpeed;
-        if (angleToTarget > 60f)
-        {
-            adjustedRotationSpeed *= 0.5f; // Much slower for sharp turns
-        }
-        else if (angleToTarget > 30f)
-        {
-            adjustedRotationSpeed *= 0.7f; // Somewhat slower for medium turns
-        }
-
-        // Limit maximum turning rate to make it more natural
-        float maxTurnPerFrame = 1.0f; // Degrees per frame
-        float maxRotation = maxTurnPerFrame * (adjustedRotationSpeed / 100f) * (Time.deltaTime * 60f); // Normalized for 60 fps
-
-        // Calculate target rotation with limits
-        Quaternion currentRotation = transform.rotation;
-        Quaternion targetRotation = Quaternion.LookRotation(direction);
-
-        // Use RotateTowards instead of Slerp for more controlled rotation
-        transform.rotation = Quaternion.RotateTowards(
-            currentRotation,
-            targetRotation,
-            maxRotation
-        );
-    }
-
-    void MoveForward(float force)
-    {
-        // Only apply movement if somewhat upright
-        float uprightness = Vector3.Dot(transform.up, Vector3.up);
-
-        if (uprightness > 0.7f) // About 45 degrees from upright
-        {
-            // Apply force
-            rb.AddForce(transform.forward * force, ForceMode.Acceleration);
-
-            // Limit speed
-            Vector3 horizontalVelocity = new Vector3(rb.velocity.x, 0, rb.velocity.z);
-            if (horizontalVelocity.magnitude > maxSpeed)
-            {
-                horizontalVelocity = horizontalVelocity.normalized * maxSpeed;
-                rb.velocity = new Vector3(horizontalVelocity.x, rb.velocity.y, horizontalVelocity.z);
-            }
-
-            // Add stabilizing downward force
-            rb.AddForce(Vector3.down * force * 0.4f, ForceMode.Force);
-        }
     }
 
     void OnCollisionEnter(Collision collision)
@@ -1074,90 +720,11 @@ public class AIPlayerController : MonoBehaviour
         }
     }
 
-    // Called when this sheep gets hit by another sheep
-    public void OnGotHit()
-    {
-        if (isDead || movementLocked) return;
-
-        // Mark the collision time to temporarily disable stability systems
-        lastCollisionTime = Time.time;
-
-        // Temporarily increase max angular velocity to allow more rotation
-        rb.maxAngularVelocity = 20f; // Increased for more dramatic knockdowns
-
-        // Reduce drag to make it slide more
-        float originalDrag = rb.drag;
-        rb.drag = originalDrag * 0.2f;
-
-        // Apply a strong destabilizing force
-        Vector3 randomDirection = new Vector3(Random.Range(-1f, 1f), 0, Random.Range(-1f, 1f)).normalized;
-        rb.AddTorque(randomDirection * 10f, ForceMode.Impulse);
-
-        // Shift center of mass upward to make tipping easier
-        rb.centerOfMass = impactCenterOfMass;
-        centerOfMassShifted = true;
-
-        // Switch to recovery state with delay to ensure it doesn't try to recover too quickly
-        ChangeState(AIState.Recover);
-        stateTimer = 1.5f;
-
-        // Schedule stability to be restored
-        StartCoroutine(RestoreStabilityAfterDelay(centerOfMassRecoveryTime, originalDrag));
-    }
-
-    // Method that can be called from network to apply a hit
-    public void ApplyNetworkHitForce(Vector3 direction, float force)
-    {
-        if (isDead || movementLocked) return;
-
-        OnGotHit();
-
-        // Apply network-synced force
-        if (rb != null)
-        {
-            // Apply both direct force and torque
-            rb.AddForce(direction * force, ForceMode.Impulse);
-
-            Vector3 torqueDir = Vector3.Cross(direction.normalized, Vector3.up).normalized;
-            rb.AddTorque(torqueDir * force * 0.8f, ForceMode.Impulse);
-        }
-    }
-
-    IEnumerator RestoreStabilityAfterDelay(float delay, float originalDrag)
-    {
-        yield return new WaitForSeconds(delay);
-
-        // Restore physics properties
-        rb.maxAngularVelocity = 7f;
-        rb.drag = originalDrag;
-
-        // Gradually restore center of mass
-        if (centerOfMassShifted)
-        {
-            float transitionTime = 0.3f; // Time to smoothly transition center of mass
-            float elapsedTime = 0f;
-
-            while (elapsedTime < transitionTime)
-            {
-                float t = elapsedTime / transitionTime;
-                rb.centerOfMass = Vector3.Lerp(impactCenterOfMass, originalCenterOfMass, t);
-                elapsedTime += Time.deltaTime;
-                yield return null;
-            }
-
-            rb.centerOfMass = originalCenterOfMass;
-            centerOfMassShifted = false;
-        }
-    }
-
-    public void Die()
+    public override void Die()
     {
         if (isDead) return; // Prevent multiple deaths
 
-        isDead = true;
-
-        // Play death effects
-        PlayDeathEffects();
+        base.Die();
 
         // For network mode, let server handle the death notification
         if (isNetworkMode && networkAI != null)
@@ -1176,47 +743,13 @@ public class AIPlayerController : MonoBehaviour
         }
         else
         {
-            // Regular offline notification
-            if (gameManager != null)
-            {
-                gameManager.SheepDied(gameObject);
-            }
+            // Regular offline notification handled by base class
         }
 
-        // Disable mesh renderer but keep collider temporarily
-        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
-        foreach (MeshRenderer renderer in renderers)
-        {
-            renderer.enabled = false;
-        }
-
-        // Destroy the game object after a delay
-        if (!isNetworkMode || NetworkServer.active)
+        // Destroy the game object after a delay in non-network mode
+        if (!isNetworkMode)
         {
             Destroy(gameObject, 2f);
-        }
-    }
-
-    // Play death effects without triggering network messages (can be called separately)
-    public void PlayDeathEffects()
-    {
-        // Play explosion sound
-        if (audioSource != null && explosionSound != null)
-        {
-            // Configure audio range
-            audioSource.rolloffMode = AudioRolloffMode.Custom;
-            audioSource.SetCustomCurve(AudioSourceCurveType.CustomRolloff, explosionRolloffCurve);
-            audioSource.minDistance = explosionMinDistance;
-            audioSource.maxDistance = explosionMaxDistance;
-
-            // Play the sound with specified volume
-            audioSource.PlayOneShot(explosionSound, explosionVolume);
-        }
-
-        // Instantiate explosion
-        if (explosionPrefab != null)
-        {
-            Instantiate(explosionPrefab, transform.position, Quaternion.identity);
         }
     }
 }

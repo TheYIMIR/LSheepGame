@@ -2,6 +2,10 @@ using Mirror;
 using UnityEngine;
 using UnityEngine.UI;
 
+/// <summary>
+/// Manages the lobby/room phase of the network game using Mirror's NetworkRoomManager framework.
+/// Handles player readiness, countdown, and transitioning to the game scene.
+/// </summary>
 public class NetworkLobbyManager : NetworkBehaviour
 {
     [Header("Lobby Settings")]
@@ -22,11 +26,9 @@ public class NetworkLobbyManager : NetworkBehaviour
     public Text votesText;
     public Text playersCountText;
 
-    // Reference to the LobbyUI for client-side updates
-    private LobbyUI lobbyUI;
-
-    // Reference to the SheepNetworkManager
+    // Reference to the SheepNetworkManager 
     private SheepNetworkManager networkManager;
+    private LobbyUI lobbyUI;
 
     // Called when the script instance is being loaded
     public override void OnStartServer()
@@ -34,13 +36,16 @@ public class NetworkLobbyManager : NetworkBehaviour
         base.OnStartServer();
 
         // Find the network manager
-        networkManager = FindObjectOfType<SheepNetworkManager>();
+        networkManager = NetworkManager.singleton as SheepNetworkManager;
 
         // Reset lobby state
         ResetLobbyState();
 
-        // Start countdown automatically
-        StartCountdown();
+        // Start countdown automatically if auto-start is enabled
+        if (networkManager != null && networkManager.autoStartCountdown)
+        {
+            StartCountdown();
+        }
 
         // Update UI initially
         UpdateServerInfo();
@@ -56,7 +61,7 @@ public class NetworkLobbyManager : NetworkBehaviour
         // Find the network manager
         if (networkManager == null)
         {
-            networkManager = FindObjectOfType<SheepNetworkManager>();
+            networkManager = NetworkManager.singleton as SheepNetworkManager;
         }
 
         if (lobbyUI != null)
@@ -117,7 +122,7 @@ public class NetworkLobbyManager : NetworkBehaviour
 
         int playerCount = 0;
 
-        // Use the improved counting method from network manager
+        // Use the counting method from network manager
         if (networkManager != null)
         {
             playerCount = networkManager.CountConnectedPlayers();
@@ -172,8 +177,11 @@ public class NetworkLobbyManager : NetworkBehaviour
         // If we have a network manager, tell it to change scenes
         if (networkManager != null)
         {
-            // Fill empty slots with bots
-            networkManager.FillWithBots();
+            // Set the bot count in the network manager if needed
+            if (networkManager.botSettingsFromLobby)
+            {
+                networkManager.ConfigureBotSettings();
+            }
 
             // Change to the game scene
             networkManager.ServerChangeScene(NetworkGameConfig.GAME_SCENE_NAME);

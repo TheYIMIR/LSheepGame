@@ -20,6 +20,6 @@ public static class NetworkGameConfig
 
     // Gameplay settings
     public const bool DEFAULT_LAST_MAN_STANDING_PLAYERS_ONLY = false; // If true, only players count for victory
-    public const int DEFAULT_BOT_COUNT_SINGLE_PLAYER = 15; // Default bots for single player
-    public const int MAX_BOT_COUNT = 50; // Maximum bots allowed
+    public const int DEFAULT_BOT_COUNT_SINGLE_PLAYER = 100; // Default bots for single player
+    public const int MAX_BOT_COUNT = 100; // Maximum bots allowed
 }

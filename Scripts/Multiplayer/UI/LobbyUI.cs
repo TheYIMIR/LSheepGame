@@ -141,10 +141,10 @@ public class LobbyUI : MonoBehaviour
         // Tell the network manager to register this player's vote
         if (NetworkClient.active && NetworkClient.isConnected)
         {
-            NetworkSheepPlayer localPlayer = NetworkClient.connection.identity.GetComponent<NetworkSheepPlayer>();
+            NetworkRoomPlayerSheep localPlayer = NetworkClient.connection.identity.GetComponent<NetworkRoomPlayerSheep>();
             if (localPlayer != null)
             {
-                localPlayer.CmdVote();
+                localPlayer.CmdVoteToStart();
 
                 // Disable vote button
                 voteButton.interactable = false;

@@ -4,16 +4,13 @@ using UnityEngine;
 using Mirror;
 using UnityEngine.SceneManagement;
 
-// Network Manager for Sheep Last-Man-Standing Game
-public class SheepNetworkManager : NetworkManager
+// Modified to extend NetworkRoomManager instead of NetworkManager
+public class SheepNetworkManager : NetworkRoomManager
 {
-    public static new SheepNetworkManager singleton { get; private set; }
-
     [Header("Player Settings")]
     public string playerName = "Sheep";
 
     [Header("Prefabs")]
-    public GameObject lobbyManagerPrefab;
     public GameObject networkGameManagerPrefab;
 
     [Header("Server Settings")]
@@ -27,6 +24,11 @@ public class SheepNetworkManager : NetworkManager
     // Bot count to spawn
     public int botCount = 0;
 
+    [Header("Room Settings")]
+    public bool autoStartCountdown = true;
+    public bool botSettingsFromLobby = true;
+    public float roomPlayerReadyTimeout = 5f;
+
     private bool isOfflineMode = false;
     private NetworkLobbyManager lobbyManager;
 
@@ -38,18 +40,12 @@ public class SheepNetworkManager : NetworkManager
     {
         base.Awake();
 
-        if (singleton != null && singleton != this)
-        {
-            Destroy(gameObject);
-        }
-        else
-        {
-            singleton = this;
-            DontDestroyOnLoad(gameObject);
-        }
-
         // Check for dedicated server mode
         CheckForDedicatedServerMode();
+
+        // Set the game and room scene names
+        RoomScene = NetworkGameConfig.LOBBY_SCENE_NAME;
+        GameplayScene = NetworkGameConfig.GAME_SCENE_NAME;
     }
 
     // Start a dedicated server if needed
@@ -100,21 +96,16 @@ public class SheepNetworkManager : NetworkManager
         StartServer();
     }
 
-    // Server callbacks
+    // Server callbacks - we can reuse these from the base NetworkRoomManager
     public override void OnStartServer()
     {
         base.OnStartServer();
-
-        // Spawn the appropriate manager based on scene
-        SpawnSceneManager();
-
         Debug.Log("Server started successfully!");
     }
 
     public override void OnStartClient()
     {
         base.OnStartClient();
-
         Debug.Log("Client started successfully!");
 
         // Verify we have the correct player name
@@ -124,73 +115,135 @@ public class SheepNetworkManager : NetworkManager
         }
     }
 
-    // Called when a server scene changes
-    public override void OnServerSceneChanged(string sceneName)
+    // Override to add custom server logic when a player joins
+    public override GameObject OnRoomServerCreateRoomPlayer(NetworkConnectionToClient conn)
     {
-        base.OnServerSceneChanged(sceneName);
-
-        // Spawn the appropriate manager based on new scene
-        SpawnSceneManager();
-    }
-
-    // Called when a client scene changes
-    public override void OnClientSceneChanged()
-    {
-        Debug.Log($"Client scene changed: {SceneManager.GetActiveScene().name}");
-
-        // Reset any local state needed on scene change
-        if (SceneManager.GetActiveScene().name == NetworkGameConfig.GAME_SCENE_NAME)
+        // First, create the room player using the base method
+        GameObject roomPlayerObj = base.OnRoomServerCreateRoomPlayer(conn);
+        
+        if (roomPlayerObj != null)
         {
-            // Set local client as ready to receive spawned objects
-            NetworkClient.Ready();
-
-            if (NetworkClient.localPlayer == null)
+            // Add to our tracking dictionary (only if not already tracked)
+            if (!playerConnections.ContainsKey(conn.connectionId))
             {
-                // If there's no local player yet, request one from the server
-                NetworkClient.AddPlayer();
+                playerConnections.Add(conn.connectionId, conn);
+                Debug.Log($"Added player connection {conn.connectionId}. Total players: {playerConnections.Count}");
+            }
+            
+            // Set the player name if we have a NetworkRoomPlayerSheep component
+            NetworkRoomPlayerSheep roomPlayer = roomPlayerObj.GetComponent<NetworkRoomPlayerSheep>();
+            if (roomPlayer != null)
+            {
+                // Set initial player name (can be updated by client later)
+                roomPlayer.playerName = "Player_" + conn.connectionId;
             }
         }
+        
+        return roomPlayerObj;
     }
 
-    // Spawn the appropriate manager based on current scene
-    private void SpawnSceneManager()
+    // Override to add custom server logic when creating a game player
+    public override GameObject OnRoomServerCreateGamePlayer(NetworkConnectionToClient conn, GameObject roomPlayer)
     {
-        string currentScene = SceneManager.GetActiveScene().name;
-
-        if (currentScene == NetworkGameConfig.LOBBY_SCENE_NAME)
+        // Get a spawn position for the player
+        Vector3 spawnPosition = Vector3.zero;
+        GameManager gameManager = GameManager.Instance;
+        if (gameManager != null)
         {
-            SpawnLobbyManager();
+            spawnPosition = gameManager.GetRandomSpawnPosition();
         }
-        else if (currentScene == NetworkGameConfig.GAME_SCENE_NAME)
-        {
-            SpawnNetworkGameManager();
-        }
-    }
 
-    // Spawn the lobby manager
-    private void SpawnLobbyManager()
-    {
-        if (NetworkServer.active && lobbyManagerPrefab != null)
-        {
-            // Check if lobby manager already exists
-            lobbyManager = FindObjectOfType<NetworkLobbyManager>();
+        // Instantiate the player at the spawn position
+        GameObject playerObj = Instantiate(playerPrefab, spawnPosition, Quaternion.identity);
 
-            if (lobbyManager == null)
+        // Configure the player
+        NetworkSheepPlayer player = playerObj.GetComponent<NetworkSheepPlayer>();
+        if (player != null)
+        {
+            player.playerName = playerName;
+
+            // Ensure player movement is locked at start
+            PlayerController playerController = player.GetComponent<PlayerController>();
+            if (playerController != null)
             {
-                GameObject lobbyObj = Instantiate(lobbyManagerPrefab);
-                NetworkServer.Spawn(lobbyObj);
-                lobbyManager = lobbyObj.GetComponent<NetworkLobbyManager>();
-                Debug.Log("Lobby manager spawned");
+                playerController.SetMovementLocked(true);
+            }
+        }
+
+        // Add to game manager's active sheep list
+        if (gameManager != null)
+        {
+            gameManager.activeSheep.Add(playerObj);
+        }
+
+        return playerObj;
+    }
+
+    // Called when all players in the room are ready
+    public override void OnRoomServerPlayersReady()
+    {
+        // Start game with countdown when all players are ready
+        base.OnRoomServerPlayersReady();
+
+        // Find the NetworkLobbyManager
+        NetworkLobbyManager lobbyManager = FindObjectOfType<NetworkLobbyManager>();
+        if (lobbyManager != null)
+        {
+            // Let the lobby manager start the countdown
+            lobbyManager.StartCountdown();
+        }
+        else
+        {
+            // Fallback if no lobby manager - change scene directly
+            double countdownTime = roomPlayerReadyTimeout;
+            if (countdownTime <= 0)
+            {
+                countdownTime = 2;
+            }
+            Invoke(nameof(ServerChangeScene), (float)countdownTime);
+        }
+    }
+
+    // Called when a client disconnects
+    public override void OnServerDisconnect(NetworkConnectionToClient conn)
+    {
+        // Remove from tracking dictionary
+        if (playerConnections.ContainsKey(conn.connectionId))
+        {
+            playerConnections.Remove(conn.connectionId);
+            Debug.Log($"Removed player connection {conn.connectionId}. Remaining players: {playerConnections.Count}");
+        }
+
+        // Let Mirror handle default disconnect behavior
+        base.OnServerDisconnect(conn);
+    }
+
+    // Called after a server scene change
+    public override void OnRoomServerSceneChanged(string sceneName)
+    {
+        base.OnRoomServerSceneChanged(sceneName);
+        
+        if (sceneName == NetworkGameConfig.GAME_SCENE_NAME)
+        {
+            Debug.Log("Game scene loaded - initializing network game");
+            
+            // Find the GameManager
+            GameManager gameManager = FindObjectOfType<GameManager>();
+            if (gameManager != null)
+            {
+                Debug.Log("Found GameManager - configuring for network play");
+                gameManager.isNetworkGame = true;
+                
+                // Calculate bots needed (99 if one player, 98 if two players, etc.)
+                int humanPlayerCount = CountConnectedPlayers();
+                int botsNeeded = 100 - humanPlayerCount;
+                
+                Debug.Log($"Spawning {botsNeeded} bots for {humanPlayerCount} human players");
+                gameManager.SpawnNetworkedSheep(botsNeeded);
             }
             else
             {
-                Debug.Log("Lobby manager already exists");
-            }
-
-            // Force an update of the player count
-            if (lobbyManager != null)
-            {
-                UpdateLobbyUI();
+                Debug.LogError("Could not find GameManager in game scene!");
             }
         }
     }
@@ -210,7 +263,7 @@ public class SheepNetworkManager : NetworkManager
                 Debug.Log("Network game manager spawned");
 
                 // Initialize any server-specific game state here
-                GameManager gameManager = managerObj.GetComponent<GameManager>();
+                GameManager gameManager = FindObjectOfType<GameManager>();
                 if (gameManager != null)
                 {
                     gameManager.isNetworkGame = true;
@@ -223,156 +276,52 @@ public class SheepNetworkManager : NetworkManager
         }
     }
 
-    // Called when a player is added to the server
-    public override void OnServerAddPlayer(NetworkConnectionToClient conn)
+    // Spawn bots for the game
+    private void SpawnBots()
     {
-        // Call base implementation to spawn player prefab
-        base.OnServerAddPlayer(conn);
+        if (!NetworkServer.active)
+            return;
 
-        // Add to our tracking dictionary (only if not already tracked)
-        if (!playerConnections.ContainsKey(conn.connectionId))
+        // Use either the specified bot count or calculate based on player count
+        int botsNeeded = 0;
+
+        if (botCount > 0)
         {
-            playerConnections.Add(conn.connectionId, conn);
-            Debug.Log($"Added player connection {conn.connectionId}. Total players: {playerConnections.Count}");
+            // Use the specified bot count directly
+            botsNeeded = botCount;
+        }
+        else
+        {
+            // Calculate based on available slots
+            int playerCount = CountConnectedPlayers();
+            botsNeeded = Mathf.Min(maxPlayersPerLobby - playerCount, 50); // Limit to 50 bots max
         }
 
-        // Set player's name if available
-        NetworkSheepPlayer player = conn.identity.GetComponent<NetworkSheepPlayer>();
-        if (player != null)
+        // Spawn the bots
+        Debug.Log($"Spawning {botsNeeded} bots");
+        GameManager gameManager = GameManager.Instance;
+        if (gameManager != null)
         {
-            // Use the set player name from the manager, or generate a default
-            if (!string.IsNullOrEmpty(playerName))
-            {
-                player.playerName = playerName;
-            }
-            else
-            {
-                player.playerName = "Player_" + conn.connectionId;
-            }
-
-            // Ensure player movement is locked at start
-            PlayerController playerController = player.GetComponent<PlayerController>();
-            if (playerController != null)
-            {
-                playerController.SetMovementLocked(true);
-            }
-        }
-
-        // Immediately notify game manager that a player has joined if we're in the game scene
-        if (SceneManager.GetActiveScene().name == NetworkGameConfig.GAME_SCENE_NAME &&
-            GameManager.Instance != null)
-        {
-            GameManager.Instance.activeSheep.Add(conn.identity.gameObject);
-        }
-
-        // Update lobby UI with new player count
-        UpdateLobbyUI();
-    }
-
-    // Called when a client disconnects from the server
-    public override void OnServerDisconnect(NetworkConnectionToClient conn)
-    {
-        // Check for player voting status before they're removed
-        if (conn.identity != null)
-        {
-            NetworkSheepPlayer player = conn.identity.GetComponent<NetworkSheepPlayer>();
-
-            // Adjust votes if player voted
-            if (player != null && player.hasVoted && lobbyManager != null)
-            {
-                lobbyManager.votesToStart--;
-            }
-
-            // Remove from game manager's active sheep list
-            if (SceneManager.GetActiveScene().name == NetworkGameConfig.GAME_SCENE_NAME &&
-                GameManager.Instance != null)
-            {
-                GameManager.Instance.activeSheep.Remove(conn.identity.gameObject);
-            }
-        }
-
-        // Remove from tracking dictionary
-        if (playerConnections.ContainsKey(conn.connectionId))
-        {
-            playerConnections.Remove(conn.connectionId);
-            Debug.Log($"Removed player connection {conn.connectionId}. Remaining players: {playerConnections.Count}");
-        }
-
-        // Let Mirror handle default disconnect behavior (despawn objects, etc.)
-        base.OnServerDisconnect(conn);
-
-        // Update lobby UI with new player count
-        UpdateLobbyUI();
-
-        // Stop countdown if no players left
-        if (CountConnectedPlayers() == 0 && lobbyManager != null)
-        {
-            // If dedicated server, reinitialize lobby
-            if (isDedicatedServer)
-            {
-                RestartLobby();
-            }
+            gameManager.SpawnNetworkedSheep(botsNeeded);
         }
     }
 
-    // Count actual connected players (excluding the host's server role)
+    // Count actual connected players
     public int CountConnectedPlayers()
     {
-        int count = playerConnections.Count;
-
-        // Debug info
-        Debug.Log($"Player connections: {count}");
-
-        return count;
-    }
-
-    // Update the lobby UI with current player count
-    private void UpdateLobbyUI()
-    {
-        if (lobbyManager != null)
-        {
-            int playerCount = CountConnectedPlayers();
-            lobbyManager.UpdatePlayerCountUI(playerCount);
-        }
-    }
-
-    // Restart the lobby (for dedicated servers)
-    private void RestartLobby()
-    {
-        if (isDedicatedServer)
-        {
-            Debug.Log("Restarting lobby for new players...");
-            ServerChangeScene(NetworkGameConfig.LOBBY_SCENE_NAME);
-        }
-    }
-
-    // Fill remaining slots with bots
-    public void FillWithBots()
-    {
-        if (NetworkServer.active)
-        {
-            // Count actual connected players
-            int playerCount = CountConnectedPlayers();
-
-            // Use either the specified bot count or calculate based on player count
-            int botsNeeded = 0;
-
-            if (botCount > 0)
-            {
-                // Use the specified bot count directly
-                botsNeeded = botCount;
-            }
-            else
-            {
-                // Calculate based on available slots
-                botsNeeded = Mathf.Min(maxPlayersPerLobby - playerCount, 50); // Limit to 50 bots max
-            }
-
-            // Use this count for the game manager
-            botCount = Mathf.Max(0, botsNeeded);
-
-            Debug.Log($"Filling lobby with {botCount} bots. Human players: {playerCount}");
-        }
+        // First check if we're the host - we always count as a player
+        bool isHost = NetworkServer.active && NetworkClient.active;
+        int hostCount = isHost ? 1 : 0;
+        
+        // Get connected client count - if we're host, we're both server and client, so avoid double-counting
+        int clientCount = playerConnections.Count;
+        
+        // Calculate total players
+        int totalPlayers = isHost ? Mathf.Max(hostCount, clientCount) : clientCount;
+        
+        Debug.Log($"Counting players: Host={isHost}, HostCount={hostCount}, ClientCount={clientCount}, TotalPlayers={totalPlayers}");
+        
+        return totalPlayers;
     }
 
     // Start offline mode (single player with bots)
@@ -380,32 +329,27 @@ public class SheepNetworkManager : NetworkManager
     {
         isOfflineMode = true;
 
-        // Load lobby scene first
-        SceneManager.LoadScene(NetworkGameConfig.LOBBY_SCENE_NAME);
-
-        // Use a coroutine to wait for scene to load
-        StartCoroutine(StartOfflineModeDelayed());
-    }
-
-    private IEnumerator StartOfflineModeDelayed()
-    {
-        // Wait for scene to load
-        yield return new WaitForSeconds(0.5f);
-
         // Start as host
         StartHost();
 
-        // Set short countdown
-        yield return new WaitForSeconds(0.2f);
-
-        lobbyManager = FindObjectOfType<NetworkLobbyManager>();
-        if (lobbyManager != null)
-        {
-            lobbyManager.currentCountdown = 3f;
-        }
+        // This will automatically take us through the room scene to the game scene
     }
 
-    // Method to print debug info about connections (useful for troubleshooting)
+    public void ConfigureBotSettings()
+    {
+        // Count how many human players we have
+        int humanPlayerCount = CountConnectedPlayers();
+        
+        // Calculate how many bots we need for a total of 100 sheep
+        int totalDesiredSheep = 100;
+        int botsNeeded = Mathf.Max(0, totalDesiredSheep - humanPlayerCount);
+        
+        // Set the bot count
+        botCount = botsNeeded;
+        
+        Debug.Log($"Configured game with {humanPlayerCount} human players and {botsNeeded} bots for a total of {totalDesiredSheep} sheep");
+    }
+
     [ContextMenu("Debug Connection Info")]
     public void DebugConnectionInfo()
     {

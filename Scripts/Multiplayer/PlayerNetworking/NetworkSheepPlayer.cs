@@ -1,98 +1,53 @@
 using Mirror;
 using UnityEngine;
+using System.Collections;
 
+/// <summary>
+/// Network component for player-controlled sheep. Handles network synchronization
+/// of player state and actions. Inherits from NetworkSheepController base class.
+/// </summary>
 [RequireComponent(typeof(PlayerController))]
-public class NetworkSheepPlayer : NetworkBehaviour
+public class NetworkSheepPlayer : NetworkSheepController
 {
-    [Header("Network Synced Variables")]
-    [SyncVar(hook = nameof(OnNameChanged))]
-    public string playerName = "NetworkSheep";
+    [Header("Player Info")]
+    [SyncVar(hook = nameof(OnPlayerNameChanged))]
+    public string playerName = "Sheep";
 
     [SyncVar]
     public bool hasVoted = false;
 
-    [SyncVar(hook = nameof(OnDeadStatusChanged))]
-    public bool isDead = false;
-
-    // Reference to the base player controller
+    // References to components
     private PlayerController playerController;
-    private Rigidbody rb;
 
-    // Cache game manager reference
-    private GameManager gameManager;
+    // Time tracking for synchronization
+    private float syncInterval = 0.1f; // How often to sync transform (10 times per second)
+    private float lastSyncTime = 0;
 
-    void Awake()
+    // Threshold for sending position updates
+    private float positionThreshold = 0.1f;
+    private float rotationThreshold = 2.0f;
+
+    // Client-synced transform
+    [SyncVar]
+    private Vector3 serverPosition;
+
+    [SyncVar]
+    private Quaternion serverRotation;
+
+    protected override void Awake()
     {
+        base.Awake();
         playerController = GetComponent<PlayerController>();
-        rb = GetComponent<Rigidbody>();
-
-        // Set tag for both client and server
-        gameObject.tag = "Sheep";
     }
 
-    void Start()
+    protected override void Start()
     {
-        // Cache game manager reference
-        gameManager = GameManager.Instance;
+        base.Start();
 
-        // Make sure we're added to active sheep list
-        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
+        // If this is local player, set specific tag
+        if (isLocalPlayer)
         {
-            gameManager.activeSheep.Add(gameObject);
-            Debug.Log($"Added player to active list: {gameObject.name}");
-        }
-    }
-
-    public override void OnStartServer()
-    {
-        base.OnStartServer();
-
-        // If no name was set, generate a random one
-        if (string.IsNullOrEmpty(playerName))
-        {
-            playerName = $"Sheep_{Random.Range(100, 999)}";
-        }
-
-        // We need to add ourselves to the GameManager's active sheep list
-        StartCoroutine(DelayedAddToActiveSheep());
-    }
-
-    private System.Collections.IEnumerator DelayedAddToActiveSheep()
-    {
-        yield return new WaitForSeconds(0.2f);
-
-        if (gameManager == null)
-        {
-            gameManager = GameManager.Instance;
-        }
-
-        if (gameManager != null && !gameManager.activeSheep.Contains(gameObject))
-        {
-            gameManager.activeSheep.Add(gameObject);
-            Debug.Log($"Added player to active list (delayed): {gameObject.name}");
-        }
-    }
-
-    public override void OnStartClient()
-    {
-        base.OnStartClient();
-
-        // Make sure PlayerController knows we're in network mode
-        if (playerController != null)
-        {
-            playerController.isNetworkMode = true;
-        }
-
-        // Disable player controller on non-local clients
-        if (!isLocalPlayer && playerController != null)
-        {
-            playerController.enabled = false;
-        }
-
-        // Set player movement to locked initially (will be unlocked when game starts)
-        if (playerController != null)
-        {
-            playerController.SetMovementLocked(true);
+            gameObject.tag = "Player";
         }
     }
 
@@ -100,7 +55,7 @@ public class NetworkSheepPlayer : NetworkBehaviour
     {
         base.OnStartLocalPlayer();
 
-        // Load the player name from player prefs if available
+        // Set the player name from player prefs if available
         if (PlayerPrefs.HasKey("PlayerName"))
         {
             CmdSetPlayerName(PlayerPrefs.GetString("PlayerName"));
@@ -110,11 +65,39 @@ public class NetworkSheepPlayer : NetworkBehaviour
             CmdSetPlayerName($"Player_{Random.Range(100, 999)}");
         }
 
-        // Set the tag for local player
-        gameObject.tag = "Player";
-
-        // Tell the camera to follow this player
+        // Find and set up camera to follow this player
         FindAndSetupCamera();
+    }
+
+    public override void OnStartClient()
+    {
+        base.OnStartClient();
+
+        // Disable player controller on non-local clients
+        if (!isLocalPlayer && playerController != null)
+        {
+            playerController.enabled = false;
+        }
+    }
+
+    void Update()
+    {
+        if (isLocalPlayer && !isDead)
+        {
+            // Check for charging
+            if (Input.GetKeyDown(KeyCode.Space) && playerController != null)
+            {
+                // Notify the server about charging
+                CmdStartCharging();
+            }
+
+            // Send transform updates periodically
+            if (Time.time > lastSyncTime + syncInterval)
+            {
+                lastSyncTime = Time.time;
+                SyncTransformToServer();
+            }
+        }
     }
 
     // Find camera and set it to follow this player
@@ -128,6 +111,13 @@ public class NetworkSheepPlayer : NetworkBehaviour
         }
     }
 
+    // Called when the player name changes
+    void OnPlayerNameChanged(string oldName, string newName)
+    {
+        Debug.Log($"Player name changed from {oldName} to {newName}");
+        // Update UI elements or other game elements that show player name, if needed
+    }
+
     // Command to set the player's name on the server
     [Command]
     public void CmdSetPlayerName(string newName)
@@ -139,7 +129,7 @@ public class NetworkSheepPlayer : NetworkBehaviour
         playerName = newName;
     }
 
-    // Command to register a vote to start
+    // Command to register a vote
     [Command]
     public void CmdVote()
     {
@@ -147,12 +137,7 @@ public class NetworkSheepPlayer : NetworkBehaviour
         {
             hasVoted = true;
 
-            // Notify the lobby manager of the vote
-            NetworkLobbyManager lobbyManager = FindObjectOfType<NetworkLobbyManager>();
-            if (lobbyManager != null)
-            {
-                lobbyManager.PlayerVoted();
-            }
+            // Inform any vote tracking system if needed
         }
     }
 
@@ -177,7 +162,7 @@ public class NetworkSheepPlayer : NetworkBehaviour
         {
             playerController.NetworkCharge();
 
-            // Play the baa sound for non-local players
+            // Play the baa sound for non-local players if needed
             AudioSource audioSource = GetComponent<AudioSource>();
             if (audioSource != null && playerController.baaSound != null)
             {
@@ -188,78 +173,45 @@ public class NetworkSheepPlayer : NetworkBehaviour
         }
     }
 
-    // Called when the player name changes
-    void OnNameChanged(string oldName, string newName)
+    // Sync transform from client to server
+    void SyncTransformToServer()
     {
-        // Update name display or any UI elements
-        Debug.Log($"Player name changed from {oldName} to {newName}");
-    }
+        // Only send if position or rotation changed significantly
+        Vector3 position = transform.position;
+        Quaternion rotation = transform.rotation;
 
-    // Called when death status changes
-    void OnDeadStatusChanged(bool oldValue, bool newValue)
-    {
-        if (newValue && !oldValue)
+        if (Vector3.Distance(position, serverPosition) > positionThreshold ||
+            Quaternion.Angle(rotation, serverRotation) > rotationThreshold)
         {
-            // Process death on all clients
-            Debug.Log($"Player death status changed to dead: {gameObject.name}");
-            ProcessDeath();
+            CmdSendTransformToServer(position, rotation);
         }
     }
 
-    // Handle collisions between network players
-    public void HandleHitNetworkPlayer(uint targetNetId, float impactForce)
-    {
-        if (isLocalPlayer)
-        {
-            CmdHitPlayer(targetNetId, transform.position, impactForce);
-        }
-    }
-
+    // Command to send transform to server
     [Command]
-    void CmdHitPlayer(uint targetNetId, Vector3 hitPosition, float impactForce)
+    void CmdSendTransformToServer(Vector3 position, Quaternion rotation)
     {
-        if (!NetworkServer.spawned.ContainsKey(targetNetId))
-            return;
+        // Update server-side values
+        serverPosition = position;
+        serverRotation = rotation;
 
-        // Get the target NetworkIdentity
-        NetworkIdentity targetIdentity = NetworkServer.spawned[targetNetId];
-        if (targetIdentity == null)
-            return;
-
-        // Get the target's position
-        GameObject targetObj = targetIdentity.gameObject;
-        Vector3 targetPos = targetObj.transform.position;
-
-        // Calculate hit direction
-        Vector3 hitDirection = (targetPos - hitPosition).normalized;
-        hitDirection.y = 0; // Keep on horizontal plane
-
-        // Check if target is an AI or player
-        NetworkSheepPlayer targetPlayer = targetObj.GetComponent<NetworkSheepPlayer>();
-        if (targetPlayer != null)
-        {
-            targetPlayer.RpcApplyHitForce(hitDirection, impactForce);
-        }
-        else
-        {
-            NetworkAISheep targetAI = targetObj.GetComponent<NetworkAISheep>();
-            if (targetAI != null)
-            {
-                targetAI.RpcApplyHitForce(hitDirection, impactForce);
-            }
-        }
+        // Broadcast to other clients
+        RpcSyncTransformToClients(position, rotation);
     }
 
+    // RPC to sync transform to all clients
     [ClientRpc]
-    public void RpcApplyHitForce(Vector3 direction, float force)
+    void RpcSyncTransformToClients(Vector3 position, Quaternion rotation)
     {
-        if (playerController != null)
+        // Only apply to remote players
+        if (!isLocalPlayer)
         {
-            playerController.ApplyNetworkHitForce(direction, force);
+            transform.position = position;
+            transform.rotation = rotation;
         }
     }
 
-    // Called when the player dies, need to send to server
+    // Called when the player dies locally
     public void OnPlayerDeath()
     {
         if (isLocalPlayer && !isDead)
@@ -269,52 +221,41 @@ public class NetworkSheepPlayer : NetworkBehaviour
         }
     }
 
+    // Command to notify server of player death
     [Command]
     void CmdPlayerDied()
     {
         // Avoid duplicate deaths
         if (isDead) return;
 
-        Debug.Log($"Player death command received on server: {gameObject.name}");
-        isDead = true;
+        // Use the base class method to sync death
+        SyncDeath();
+    }
 
-        // Notify game manager on server
-        if (gameManager != null)
+    // Override RPC from base class for type-specific handling
+    public override void RpcApplyHitForce(Vector3 direction, float force)
+    {
+        if (isServer) return; // Server already applied effects
+
+        // Apply to the player controller
+        if (playerController != null)
         {
-            Debug.Log($"Notifying game manager of player death: {gameObject.name}");
-            gameManager.SheepDied(gameObject);
-        }
-        else
-        {
-            Debug.LogError("Game manager is null when trying to notify of player death");
+            playerController.ApplyNetworkHitForce(direction, force);
         }
     }
 
-    // Process death effects (called on all clients)
-    void ProcessDeath()
+    // Override death handling for player-specific behavior
+    protected override void HandleDeath()
     {
-        Debug.Log($"Processing player death: {gameObject.name}");
+        if (isDead) return; // Prevent multiple death processes
 
-        // Update local UI to show this player is dead
-        MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
-        foreach (MeshRenderer renderer in renderers)
+        base.HandleDeath();
+
+        // Player-specific death handling
+        if (isLocalPlayer)
         {
-            renderer.enabled = false;
-        }
-
-        // Disable physics interactions
-        if (rb != null)
-        {
-            rb.isKinematic = true;
-        }
-
-        // Play death effects if this is the local player
-        if (isLocalPlayer && playerController != null)
-        {
-            // Play explosion effect without triggering more network messages
-            playerController.PlayDeathEffects();
-
-            // Show defeat UI
+            // Show defeat UI or other local player death effects
+            GameManager gameManager = GameManager.Instance;
             if (gameManager != null && gameManager.defeatPanel != null)
             {
                 gameManager.defeatPanel.SetActive(true);
@@ -325,12 +266,6 @@ public class NetworkSheepPlayer : NetworkBehaviour
                     gameManager.mainMenuButton.gameObject.SetActive(true);
                 }
             }
-        }
-
-        // If not server, notify game manager directly on client
-        if (!isServer && gameManager != null && gameManager.activeSheep.Contains(gameObject))
-        {
-            gameManager.SheepDied(gameObject);
         }
     }
 }

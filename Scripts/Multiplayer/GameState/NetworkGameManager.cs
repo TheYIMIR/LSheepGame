@@ -5,12 +5,10 @@ using Mirror;
 
 // This class should be attached to the GameManager object
 [RequireComponent(typeof(GameManager))]
-[RequireComponent(typeof(NetworkBotSpawner))]
 public class NetworkGameManager : NetworkBehaviour
 {
     // Reference to the base game manager
     private GameManager gameManager;
-    private NetworkBotSpawner botSpawner;
 
     // Network properties
     [SyncVar(hook = nameof(OnGameStartedChanged))]
@@ -30,17 +28,16 @@ public class NetworkGameManager : NetworkBehaviour
     private float syncStateTimer = 0f;
     private float syncInterval = 0.5f;
 
+    private bool allSheepInitialized = false;
+    private float gameStartDelay = 3f;
+
     // Track the winner for proper UI display
     private GameObject winnerSheep = null;
-
-    // Track if we need to force a sheep count update
-    private bool forceCountUpdate = false;
 
     private void Awake()
     {
         // Get reference to the game manager
         gameManager = GetComponent<GameManager>();
-        botSpawner = GetComponent<NetworkBotSpawner>();
 
         if (gameManager == null)
         {
@@ -58,6 +55,8 @@ public class NetworkGameManager : NetworkBehaviour
     {
         base.OnStartServer();
 
+        Debug.Log("NetworkGameManager starting on server");
+
         // Initialize game mode from PlayerPrefs
         if (PlayerPrefs.HasKey("PlayersOnlyMode"))
         {
@@ -73,8 +72,24 @@ public class NetworkGameManager : NetworkBehaviour
         // Register for death events
         GameEvents.onSheepDied += OnSheepDied;
 
-        // Listen to game manager events
+        // Start the delay coroutine to prevent premature win conditions
+        StartCoroutine(DelayGameStart());
+
+        // Monitor game manager state
         StartCoroutine(MonitorGameManager());
+    }
+
+    public IEnumerator DelayGameStart()
+    {
+        allSheepInitialized = false;
+        Debug.Log("Delaying game start checks to allow all sheep to initialize...");
+        
+        // Wait for the initialization period
+        yield return new WaitForSeconds(gameStartDelay);
+        
+        // Now it's safe to check win conditions
+        allSheepInitialized = true;
+        Debug.Log("Game initialization complete - now checking win conditions");
     }
 
     void OnDestroy()
@@ -141,12 +156,12 @@ public class NetworkGameManager : NetworkBehaviour
                 gameManager.sheepRemainingText.text = $"Sheep Remaining: {sheepCount}";
             }
 
-            lastManStandingPlayerOnly = playerOnlyLastManStanding;
+            gameManager.playersOnlyMode = playerOnlyLastManStanding;
 
             // Unlock all sheep if game has started
             if (gameStarted)
             {
-                UnlockAllSheepMovement();
+                gameManager.EnableAllSheep();
             }
         }
     }
@@ -157,7 +172,7 @@ public class NetworkGameManager : NetworkBehaviour
         if (isServer)
         {
             Debug.Log($"NetworkGameManager received sheep death event: {sheep.name}");
-            forceCountUpdate = true;
+            CheckGameEndConditions();
         }
     }
 
@@ -180,12 +195,11 @@ public class NetworkGameManager : NetworkBehaviour
                 // Get current count
                 int currentCount = gameManager.activeSheep.Count;
 
-                // Check if count changed or a force update is needed
-                if (currentCount != lastCount || forceCountUpdate)
+                // Check if count changed
+                if (currentCount != lastCount)
                 {
                     lastCount = currentCount;
                     remainingSheepCount = currentCount;
-                    forceCountUpdate = false;
 
                     Debug.Log($"Sheep count updated to: {remainingSheepCount}");
 
@@ -228,6 +242,11 @@ public class NetworkGameManager : NetworkBehaviour
     // Check game end conditions specifically for network play
     private void CheckGameEndConditions()
     {
+        if (!allSheepInitialized || !gameManager.gameStarted)
+        {
+            return;
+        }
+
         if (!isServer || gameManager.gameOver) return;
 
         // Count human players that are still alive
@@ -321,7 +340,7 @@ public class NetworkGameManager : NetworkBehaviour
     }
 
     [ClientRpc]
-    private void RpcUpdateSheepCount(int newCount)
+    public void RpcUpdateSheepCount(int newCount)
     {
         // Update UI on clients
         if (gameManager != null && gameManager.sheepRemainingText != null)
@@ -427,7 +446,7 @@ public class NetworkGameManager : NetworkBehaviour
             // Unlock all sheep movement on clients
             if (!isServer)
             {
-                UnlockAllSheepMovement();
+                gameManager.EnableAllSheep();
             }
         }
     }
@@ -465,26 +484,6 @@ public class NetworkGameManager : NetworkBehaviour
     [ClientRpc]
     void RpcUnlockAllSheepMovement()
     {
-        UnlockAllSheepMovement();
-    }
-
-    // Unlock movement for all sheep - local implementation
-    void UnlockAllSheepMovement()
-    {
-        // Find and unlock all player controllers
-        PlayerController[] players = FindObjectsOfType<PlayerController>();
-        foreach (PlayerController player in players)
-        {
-            player.SetMovementLocked(false);
-        }
-
-        // Find and unlock all AI controllers
-        AIPlayerController[] aiPlayers = FindObjectsOfType<AIPlayerController>();
-        foreach (AIPlayerController ai in aiPlayers)
-        {
-            ai.SetMovementLocked(false);
-        }
-
-        Debug.Log("All sheep movement unlocked");
+        gameManager.EnableAllSheep();
     }
 }

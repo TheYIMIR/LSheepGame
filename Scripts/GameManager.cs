@@ -43,8 +43,9 @@ public class GameManager : MonoBehaviour
 
     [Header("Network Settings")]
     public bool isNetworkGame = false;
+    public bool playersOnlyMode = false; // Only players count for victory conditions in network mode
 
-    // Game state - made public for network access
+    // Game state
     public List<GameObject> activeSheep = new List<GameObject>();
     public GameObject playerSheep;
     public bool gameStarted = false;
@@ -112,44 +113,96 @@ public class GameManager : MonoBehaviour
         }
 
         // Start the game initialization
-        StartCoroutine(InitializeGame());
+        if (!isNetworkGame)
+        {
+            // Only auto-initialize for offline games
+            StartCoroutine(InitializeGame());
+        }
+    }
+    
+    public void InitializeNetworkGame(bool playersOnlyVictory = false)
+    {
+        if (!isNetworkGame) return;
+
+        Debug.Log("Initializing network game with playersOnlyMode=" + playersOnlyVictory);
+        
+        // Set game mode
+        playersOnlyMode = playersOnlyVictory;
+        
+        // Make sure the game isn't considered started yet
+        gameStarted = false;
+        gameOver = false;
+        
+        // Reset any game state needed
+        if (activeSheep == null)
+        {
+            activeSheep = new List<GameObject>();
+        }
+        else
+        {
+            activeSheep.Clear();
+        }
+        
+        // Find local player and add it to active sheep list
+        if (NetworkClient.localPlayer != null)
+        {
+            GameObject localPlayerObj = NetworkClient.localPlayer.gameObject;
+            if (!activeSheep.Contains(localPlayerObj))
+            {
+                activeSheep.Add(localPlayerObj);
+                Debug.Log("Added local player to active sheep list: " + localPlayerObj.name);
+                
+                // Set reference to player's sheep
+                playerSheep = localPlayerObj;
+            }
+        }
+        
+        // Find other network players and add them
+        NetworkSheepPlayer[] allNetworkPlayers = FindObjectsOfType<NetworkSheepPlayer>();
+        foreach (NetworkSheepPlayer netPlayer in allNetworkPlayers)
+        {
+            if (!activeSheep.Contains(netPlayer.gameObject))
+            {
+                activeSheep.Add(netPlayer.gameObject);
+                Debug.Log("Added network player to active sheep list: " + netPlayer.gameObject.name);
+            }
+        }
+        
+        // Find network AI sheep and add them
+        NetworkAISheep[] aiSheep = FindObjectsOfType<NetworkAISheep>();
+        foreach (NetworkAISheep ai in aiSheep)
+        {
+            if (!activeSheep.Contains(ai.gameObject))
+            {
+                activeSheep.Add(ai.gameObject);
+                Debug.Log("Added network AI to active sheep list: " + ai.gameObject.name);
+            }
+        }
+        
+        // Hide end game UI
+        if (victoryPanel != null) victoryPanel.SetActive(false);
+        if (defeatPanel != null) defeatPanel.SetActive(false);
+        
+        // Hide buttons
+        if (restartButton != null) restartButton.gameObject.SetActive(false);
+        if (mainMenuButton != null) mainMenuButton.gameObject.SetActive(false);
+        
+        // Update UI with initial count
+        remainingSheepCount = activeSheep.Count;
+        UpdateSheepCountUI();
+        Debug.Log("Initial sheep count: " + remainingSheepCount);
+        
+        // Start countdown to game start
+        StartCoroutine(NetworkGameCountdown());
     }
 
-    IEnumerator InitializeGame()
+    // Network game countdown
+    private IEnumerator NetworkGameCountdown()
     {
         // Show countdown
         if (countdownText != null)
         {
             countdownText.gameObject.SetActive(true);
-        }
-
-        if (isNetworkGame)
-        {
-            // In network mode, wait for all players to be ready
-            if (NetworkServer.active)
-            {
-                yield return WaitForNetworkPlayers();
-            }
-            else
-            {
-                // Wait for a bit to let the server set things up
-                yield return new WaitForSeconds(1f);
-            }
-
-            // Find network players and add them to active sheep
-            CollectNetworkPlayers();
-        }
-        else
-        {
-            // Spawn local player first
-            SpawnLocalPlayer();
-
-            // Spawn AI sheep
-            for (int i = 0; i < initialSheepCount - 1; i++) // -1 because player is already spawned
-            {
-                SpawnAISheep();
-                yield return new WaitForSeconds(0.1f); // Small delay between spawns for performance
-            }
         }
 
         // Set initial sheep count
@@ -187,61 +240,57 @@ public class GameManager : MonoBehaviour
         EnableAllSheep();
     }
 
-    // Helper method to wait for network players
-    IEnumerator WaitForNetworkPlayers()
+    IEnumerator InitializeGame()
     {
-        // Give clients time to join and spawn
-        float waitTime = 2f;
-        while (waitTime > 0)
+        // Show countdown
+        if (countdownText != null)
         {
-            waitTime -= Time.deltaTime;
-            yield return null;
+            countdownText.gameObject.SetActive(true);
         }
 
-        // If we're the server, spawn bots to fill remaining slots
-        if (NetworkServer.active)
+        // Spawn local player first
+        SpawnLocalPlayer();
+
+        // Spawn AI sheep
+        for (int i = 0; i < initialSheepCount - 1; i++) // -1 because player is already spawned
         {
-            int playerCount = 0;
-
-            // Count all network player objects
-            NetworkSheepPlayer[] networkPlayers = FindObjectsOfType<NetworkSheepPlayer>();
-            playerCount = networkPlayers.Length;
-
-            // Spawn bots for the remaining slots
-            int botsNeeded = initialSheepCount - playerCount;
-            for (int i = 0; i < botsNeeded; i++)
-            {
-                SpawnAISheep();
-                yield return new WaitForSeconds(0.1f);
-            }
-        }
-    }
-
-    // Helper method to collect network players
-    void CollectNetworkPlayers()
-    {
-        // Find all NetworkSheepPlayer objects
-        NetworkSheepPlayer[] networkPlayers = FindObjectsOfType<NetworkSheepPlayer>();
-
-        foreach (NetworkSheepPlayer netPlayer in networkPlayers)
-        {
-            GameObject player = netPlayer.gameObject;
-
-            // Add to active sheep list
-            if (!activeSheep.Contains(player))
-            {
-                activeSheep.Add(player);
-            }
-
-            // Set local player reference if this is our player
-            if (netPlayer.isLocalPlayer)
-            {
-                playerSheep = player;
-                Debug.Log("Set local player reference: " + player.name);
-            }
+            SpawnAISheep();
+            yield return new WaitForSeconds(0.1f); // Small delay between spawns for performance
         }
 
-        Debug.Log($"Collected {networkPlayers.Length} network players");
+        // Set initial sheep count
+        remainingSheepCount = activeSheep.Count;
+        UpdateSheepCountUI();
+
+        // Countdown sequence
+        for (int i = Mathf.CeilToInt(startDelay); i > 0; i--)
+        {
+            if (countdownText != null)
+            {
+                countdownText.text = i.ToString();
+            }
+            yield return new WaitForSeconds(1f);
+        }
+
+        // Start the game
+        if (countdownText != null)
+        {
+            countdownText.text = "GO!";
+
+            // Play random start sound
+            PlayRandomSound(startGameSounds);
+
+            yield return new WaitForSeconds(1f);
+            countdownText.gameObject.SetActive(false);
+        }
+
+        gameStarted = true;
+
+        // Trigger game started event
+        GameEvents.TriggerGameStarted();
+
+        // Enable all sheep movement
+        EnableAllSheep();
     }
 
     // Helper method to play a random sound from an array
@@ -262,8 +311,9 @@ public class GameManager : MonoBehaviour
         // Get arena center
         Vector3 arenaCenter = GetArenaCenter();
 
-        // Spawn player at center
-        playerSheep = Instantiate(playerSheepPrefab, arenaCenter, Quaternion.identity);
+        // Spawn player at random position near center
+        Vector3 spawnPos = GetRandomSpawnPosition(false);
+        playerSheep = Instantiate(playerSheepPrefab, spawnPos, Quaternion.identity);
 
         // Add to active sheep list
         activeSheep.Add(playerSheep);
@@ -272,25 +322,14 @@ public class GameManager : MonoBehaviour
         PlayerController playerController = playerSheep.GetComponent<PlayerController>();
         if (playerController != null)
         {
-            playerController.enabled = false;
+            playerController.SetMovementLocked(true);
         }
     }
 
     void SpawnAISheep()
     {
-        // Get a random position within a radius from the center
-        Vector3 centerPos = GetArenaCenter();
-
-        // Calculate random spawn position (in a circle)
-        float spawnRadius = Mathf.Min(arenaSize.x, arenaSize.z) * 0.4f;
-        float randomAngle = Random.Range(0, 2f * Mathf.PI);
-        float randomDistance = Random.Range(spawnRadius * 0.5f, spawnRadius);
-
-        Vector3 spawnPos = new Vector3(
-            centerPos.x + randomDistance * Mathf.Cos(randomAngle),
-            0,
-            centerPos.z + randomDistance * Mathf.Sin(randomAngle)
-        );
+        // Get a random position
+        Vector3 spawnPos = GetRandomSpawnPosition(true);
 
         // Random rotation
         Quaternion randomRot = Quaternion.Euler(0, Random.Range(0, 360), 0);
@@ -323,23 +362,36 @@ public class GameManager : MonoBehaviour
             if (playerController != null)
             {
                 playerController.enabled = true;
+                playerController.SetMovementLocked(false);
             }
 
             AIPlayerController aiController = sheep.GetComponent<AIPlayerController>();
             if (aiController != null)
             {
                 aiController.enabled = true;
+                aiController.SetMovementLocked(false);
             }
 
-            // For network sheep, enable their controllers too
+            // For network sheep, ensure controllers are enabled
             NetworkSheepPlayer netPlayer = sheep.GetComponent<NetworkSheepPlayer>();
             if (netPlayer != null)
             {
-                // Enable the player's controller components
                 PlayerController netPlayerController = sheep.GetComponent<PlayerController>();
                 if (netPlayerController != null)
                 {
                     netPlayerController.enabled = true;
+                    netPlayerController.SetMovementLocked(false);
+                }
+            }
+
+            NetworkAISheep networkAI = sheep.GetComponent<NetworkAISheep>();
+            if (networkAI != null)
+            {
+                AIPlayerController networkAIController = sheep.GetComponent<AIPlayerController>();
+                if (networkAIController != null)
+                {
+                    networkAIController.enabled = true;
+                    networkAIController.SetMovementLocked(false);
                 }
             }
         }
@@ -347,6 +399,17 @@ public class GameManager : MonoBehaviour
 
     void Update()
     {
+
+        if (isNetworkGame && NetworkServer.active)
+        {
+            // Fix for zero sheep count before game fully starts
+            if (activeSheep.Count == 0 && !gameOver && !gameStarted)
+            {
+                Debug.LogWarning("Detected zero sheep count before game started. This shouldn't happen!");
+                return; // Skip the rest of Update to prevent premature game over
+            }
+        }
+
         if (!gameStarted || gameOver) return;
 
         // Check if game is over
@@ -411,13 +474,12 @@ public class GameManager : MonoBehaviour
             playerAlive = true;
         }
 
-        // Game end conditions - handle differently for network games
+        // For network games, let NetworkGameManager handle game end conditions
         if (isNetworkGame)
         {
-            // For network games, the NetworkGameManager handles win/loss conditions
-            if (!playerAlive && !gameOver)
+            // Handle local player death
+            if (!playerAlive && !gameOver && playerSheep != null)
             {
-                // Player died, show defeat panel for this player only
                 playerSheep = null;
 
                 // Show defeat panel for this player
@@ -435,20 +497,19 @@ public class GameManager : MonoBehaviour
                 // Play random defeat sound
                 PlayRandomSound(defeatSounds);
             }
+            return;
         }
-        else
+
+        // Standard single player end conditions
+        if (!playerAlive)
         {
-            // Standard single player end conditions
-            if (!playerAlive)
-            {
-                // Player died
-                EndGame(false);
-            }
-            else if (activeSheep.Count == 1 && playerAlive)
-            {
-                // Player is the only one left
-                EndGame(true);
-            }
+            // Player died
+            EndGame(false);
+        }
+        else if (activeSheep.Count == 1 && playerAlive)
+        {
+            // Player is the only one left
+            EndGame(true);
         }
     }
 
@@ -510,6 +571,16 @@ public class GameManager : MonoBehaviour
         {
             sheepRemainingText.text = "Sheep Remaining: " + remainingSheepCount;
         }
+
+        // In network mode, sync to all clients
+        if (isNetworkGame && NetworkServer.active)
+        {
+            NetworkGameManager networkGameManager = FindObjectOfType<NetworkGameManager>();
+            if (networkGameManager != null)
+            {
+                networkGameManager.RpcUpdateSheepCount(remainingSheepCount);
+            }
+        }
     }
 
     void EnforceArenaBoundaries(GameObject sheep)
@@ -527,7 +598,6 @@ public class GameManager : MonoBehaviour
         if (isNetworkGame && netPlayer != null && netPlayer.isLocalPlayer && NetworkServer.active)
         {
             isHostWithAuthority = true;
-            // Debug.Log("Applying boundaries to host player");
         }
 
         // Get arena center and boundaries
@@ -661,30 +731,187 @@ public class GameManager : MonoBehaviour
         return (arena != null) ? arena.position : Vector3.zero;
     }
 
-    // Helper method for spawning networked sheep from network manager
+    // Spawn networked sheep (for network games)
     public void SpawnNetworkedSheep(int count)
     {
-        if (!isNetworkGame || !NetworkServer.active) return;
+        // Debug point
+        Debug.Log($"SpawnNetworkedSheep called with count: {count}");
+        
+        if (!isNetworkGame)
+        {
+            Debug.LogError("Attempted to spawn network sheep in non-network game mode");
+            return;
+        }
+        
+        if (!NetworkServer.active)
+        {
+            Debug.LogError("Only the server can spawn networked sheep");
+            return;
+        }
 
+        Debug.Log($"Spawning {count} networked bots");
+        StartCoroutine(SpawnNetworkedSheepProgressively(count));
+    }
+
+    // Progressive spawn to avoid network spikes
+    private IEnumerator SpawnNetworkedSheepProgressively(int count)
+    {
+        const int BATCH_SIZE = 5; // Number of bots per batch
+        
+        Debug.Log($"Starting to spawn {count} bots progressively");
+        
+        // First ensure player is already in the active sheep list
+        NetworkSheepPlayer localPlayer = null;
+        if (NetworkClient.localPlayer != null)
+        {
+            localPlayer = NetworkClient.localPlayer.GetComponent<NetworkSheepPlayer>();
+        }
+        
+        if (localPlayer != null && !activeSheep.Contains(localPlayer.gameObject))
+        {
+            Debug.Log("Adding local player to active sheep list before spawning bots");
+            activeSheep.Add(localPlayer.gameObject);
+        }
+        
+        // Clear or initialize the active sheep list first with players
+        List<GameObject> playerSheepList = new List<GameObject>();
+        foreach (var sheep in activeSheep)
+        {
+            if (sheep != null && sheep.GetComponent<NetworkSheepPlayer>() != null)
+            {
+                playerSheepList.Add(sheep);
+            }
+        }
+        
+        // Reset the active sheep list with just the players
+        activeSheep.Clear();
+        foreach (var playerSheep in playerSheepList)
+        {
+            activeSheep.Add(playerSheep);
+        }
+        
+        Debug.Log($"Starting with {activeSheep.Count} player sheep before spawning bots");
+        
+        // Check if the prefab is assigned
+        if (aiSheepPrefab == null)
+        {
+            Debug.LogError("aiSheepPrefab is null! Cannot spawn bots!");
+            yield break;
+        }
+        
+        // Now spawn the bots
         for (int i = 0; i < count; i++)
         {
-            SpawnAISheep();
+            // Get a random spawn position
+            Vector3 spawnPos = GetRandomSpawnPosition(true);
+            Quaternion randomRot = Quaternion.Euler(0, Random.Range(0, 360), 0);
+            
+            // Spawn bot
+            GameObject botObject = Instantiate(aiSheepPrefab, spawnPos, randomRot);
+            if (botObject == null)
+            {
+                Debug.LogError("Failed to instantiate bot!");
+                continue;
+            }
+            
+            Debug.Log($"Bot {i+1}/{count} instantiated successfully: {botObject.name}");
+            
+            // Configure network components
+            NetworkAISheep networkAI = botObject.GetComponent<NetworkAISheep>();
+            if (networkAI != null)
+            {
+                networkAI.isNetworkBot = true;
+            }
+            else
+            {
+                Debug.LogWarning($"Bot {i+1}/{count} is missing NetworkAISheep component");
+            }
+            
+            AIPlayerController aiController = botObject.GetComponent<AIPlayerController>();
+            if (aiController != null)
+            {
+                aiController.isNetworkMode = true;
+                
+                // Lock movement until game starts
+                aiController.SetMovementLocked(!gameStarted);
+            }
+            else
+            {
+                Debug.LogWarning($"Bot {i+1}/{count} is missing AIPlayerController component");
+            }
+            
+            // Add to active sheep list
+            activeSheep.Add(botObject);
+            
+            // Spawn on network
+            try
+            {
+                NetworkServer.Spawn(botObject);
+                Debug.Log($"Bot {i+1}/{count} successfully spawned on network");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Error spawning bot on network: {e.Message}");
+            }
+            
+            // Update UI with each batch to show progress
+            if (i % BATCH_SIZE == 0)
+            {
+                UpdateSheepCountUI();
+                Debug.Log($"Progress: Spawned {i+1}/{count} bots, total sheep now: {activeSheep.Count}");
+            }
+            
+            // Spawn in batches to distribute network load
+            if (i % BATCH_SIZE == BATCH_SIZE - 1)
+            {
+                yield return new WaitForSeconds(0.1f);
+            }
+            else
+            {
+                // Small delay between individual spawns for stability
+                yield return new WaitForSeconds(0.02f);
+            }
+        }
+        
+        // Final update with correct count
+        Debug.Log($"Final sheep count after spawning: {activeSheep.Count}");
+        UpdateSheepCountUI();
+        
+        // Wait a bit to ensure everything is properly set up
+        yield return new WaitForSeconds(0.5f);
+        
+        // Make sure game is properly started after bots are all ready
+        if (!gameStarted)
+        {
+            Debug.Log("Setting gameStarted to true after bot spawning completed");
+            gameStarted = true;
+            
+            // Unlock all sheep movement if game is starting
+            EnableAllSheep();
         }
     }
 
-    // Find a random spawn position for a player (for network spawning)
-    public Vector3 GetRandomSpawnPosition()
+    // Enhanced random spawn position 
+    public Vector3 GetRandomSpawnPosition(bool avoidCenter = false)
     {
         Vector3 centerPos = GetArenaCenter();
 
-        // Use a smaller radius to keep players from spawning too far out
-        float spawnRadius = Mathf.Min(arenaSize.x, arenaSize.z) * 0.3f;
-        float randomAngle = Random.Range(0, 2f * Mathf.PI);
-        float randomDistance = Random.Range(spawnRadius * 0.3f, spawnRadius);
+        // Arena size with margin
+        float arenaWidth = arenaSize.x * 0.8f;  // 80% of arena width to avoid edges
+        float arenaLength = arenaSize.z * 0.8f;  // 80% of arena length to avoid edges
 
+        // Determine minimum distance from center based on avoidCenter flag
+        float minDistance = avoidCenter ? arenaWidth * 0.2f : 0f;
+        float maxDistance = arenaWidth * 0.4f;  // Limit max distance from center to avoid edges
+
+        // Generate random angle and distance for polar coordinates
+        float randomAngle = Random.Range(0, 2f * Mathf.PI);
+        float randomDistance = Random.Range(minDistance, maxDistance);
+
+        // Convert to cartesian coordinates
         Vector3 spawnPos = new Vector3(
             centerPos.x + randomDistance * Mathf.Cos(randomAngle),
-            0,
+            0,  // Keep on ground plane
             centerPos.z + randomDistance * Mathf.Sin(randomAngle)
         );
 
